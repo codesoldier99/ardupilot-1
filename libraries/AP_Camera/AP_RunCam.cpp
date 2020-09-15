@@ -26,6 +26,7 @@
 #if HAL_RUNCAM_ENABLED
 
 #include <AP_Math/AP_Math.h>
+#include <AP_Math/crc.h>
 #include <GCS_MAVLink/GCS.h>
 #include <AP_Logger/AP_Logger.h>
 
@@ -256,8 +257,18 @@ bool AP_RunCam::pre_arm_check(char *failure_msg, const uint8_t failure_msg_len) 
 // OSD update loop
 void AP_RunCam::update_osd()
 {
+    bool use_armed_state_machine = hal.util->get_soft_armed();
+#if OSD_ENABLED
+    // prevent runcam stick gestures interferring with osd stick gestures
+    if (!use_armed_state_machine) {
+        const AP_OSD* osd = AP::osd();
+        if (osd != nullptr) {
+            use_armed_state_machine = !osd->is_readonly_screen();
+        }
+    }
+#endif
     // run a reduced state simulation process when armed
-    if (AP::arming().is_armed()) {
+    if (use_armed_state_machine) {
         update_state_machine_armed();
         return;
     }
@@ -900,20 +911,6 @@ void AP_RunCam::send_packet(Command command, uint8_t param)
     uart->flush();
 }
 
-// crc functions
-uint8_t AP_RunCam::crc8_dvb_s2(uint8_t crc, uint8_t a)
-{
-    crc ^= a;
-    for (uint8_t i = 0; i < 8; ++i) {
-        if (crc & 0x80) {
-            crc = (crc << 1) ^ 0xD5;
-        } else {
-            crc = crc << 1;
-        }
-    }
-    return crc;
-}
-
 uint8_t AP_RunCam::crc8_high_first(uint8_t *ptr, uint8_t len)
 {
     uint8_t crc = 0x00;
@@ -1027,7 +1024,7 @@ uint8_t AP_RunCam::Request::get_crc() const
 {
     uint8_t crc = 0;
     for (int i = 0; i < _recv_response_length; i++) {
-        crc = AP_RunCam::crc8_dvb_s2(crc, _recv_buf[i]);
+        crc = crc8_dvb_s2(crc, _recv_buf[i]);
     }
     return crc;
 }
