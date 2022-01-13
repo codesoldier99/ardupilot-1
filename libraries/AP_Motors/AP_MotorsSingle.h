@@ -53,6 +53,8 @@ protected:
     // output - sends commands to the motors
     void                output_armed_stabilizing() override;
 
+    const char* _get_frame_string() const override { return "SINGLE"; }
+
     int16_t             _throttle_radio_output;   // total throttle pwm value, summed onto throttle channel minimum, typically ~1100-1900
     float               _actuator_out[NUM_ACTUATORS]; // combined roll, pitch, yaw and throttle outputs to motors in 0~1 range
     float               _thrust_out;

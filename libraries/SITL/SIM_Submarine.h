@@ -89,16 +89,20 @@ protected:
 
     bool on_ground() const override;
 
+    float rangefinder_beam_width() const override { return 10; }
+
+    float perpendicular_distance_to_rangefinder_surface() const override;
+
     // calculate sea floor depth based for terrain follow
-    float calculate_sea_floor_depth(const Vector3f &/*position*/);
+    float calculate_sea_floor_depth(const Vector3d &/*position*/) const;
     // calculate rotational and linear accelerations
     void calculate_forces(const struct sitl_input &input, Vector3f &rot_accel, Vector3f &body_accel);
     // calculate buoyancy
     float calculate_buoyancy_acceleration();
     // calculate drag from velocity and drag coefficient
-    void calculate_drag_force(const Vector3f &velocity, const Vector3f &drag_coefficient, Vector3f &force);
+    void calculate_drag_force(const Vector3f &velocity, const Vector3f &drag_coefficient, Vector3f &force) const;
     // calculate torque water resistance
-    void calculate_angular_drag_torque(const Vector3f &angular_velocity, const Vector3f &drag_coefficient, Vector3f &torque);
+    void calculate_angular_drag_torque(const Vector3f &angular_velocity, const Vector3f &drag_coefficient, Vector3f &torque) const;
     // calculate torque induced by buoyancy foams
     void calculate_buoyancy_torque(Vector3f &torque);
 

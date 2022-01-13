@@ -36,6 +36,7 @@ COMMON_VEHICLE_DEPENDENT_LIBRARIES = [
     'AP_InertialSensor',
     'AP_Math',
     'AP_Mission',
+    'AP_DAL',
     'AP_NavEKF',
     'AP_NavEKF2',
     'AP_NavEKF3',
@@ -101,9 +102,24 @@ COMMON_VEHICLE_DEPENDENT_LIBRARIES = [
     'AP_RCTelemetry',
     'AP_Generator',
     'AP_MSP',
+    'AP_OLC',
+    'AP_WheelEncoder',
+    'AP_ExternalAHRS',
+    'AP_VideoTX',
+    'AP_FETtecOneWire',
+    'AP_Torqeedo',
 ]
 
-def get_legacy_defines(sketch_name):
+def get_legacy_defines(sketch_name, bld):
+    # If we are building heli, we adjust the build directory define so that 
+    # we do not need to actually split heli and copter directories
+    if bld.cmd == 'heli' or 'heli' in bld.targets:
+        return [
+        'APM_BUILD_DIRECTORY=APM_BUILD_Heli',
+        'SKETCH="' + sketch_name + '"',
+        'SKETCHNAME="' + sketch_name + '"',
+        ]
+
     return [
         'APM_BUILD_DIRECTORY=APM_BUILD_' + sketch_name,
         'SKETCH="' + sketch_name + '"',
@@ -124,6 +140,8 @@ def ap_autoconfigure(execute_method):
         """
         Wraps :py:func:`waflib.Context.Context.execute` on the context class
         """
+        if 'tools/' in self.targets:
+            raise Errors.WafError('\"tools\" name has been replaced with \"tool\" for build please use that!')
         if not Configure.autoconfig:
             return execute_method(self)
 
@@ -245,7 +263,7 @@ def ap_program(bld,
         program_name = bld.path.name
 
     if use_legacy_defines:
-        kw['defines'].extend(get_legacy_defines(bld.path.name))
+        kw['defines'].extend(get_legacy_defines(bld.path.name, bld))
 
     kw['features'] = kw.get('features', []) + bld.env.AP_PROGRAM_FEATURES
 
@@ -500,8 +518,9 @@ def _select_programs_from_group(bld):
         else:
             bld.targets = tg.name
 
-        for tg in _grouped_programs[group][1:]:
-            bld.targets += ',' + tg.name
+        if len(_grouped_programs[group]) > 2:
+            for tg in _grouped_programs[group][1:]:
+                bld.targets += ',' + tg.name
 
 def options(opt):
     opt.ap_groups = {

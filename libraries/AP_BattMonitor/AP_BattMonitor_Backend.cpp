@@ -30,15 +30,23 @@ AP_BattMonitor_Backend::AP_BattMonitor_Backend(AP_BattMonitor &mon, AP_BattMonit
 {
 }
 
-/// capacity_remaining_pct - returns the % battery capacity remaining (0 ~ 100)
-uint8_t AP_BattMonitor_Backend::capacity_remaining_pct() const
+// capacity_remaining_pct - returns true if the battery % is available and writes to the percentage argument
+// return false if the battery is unhealthy, does not have current monitoring, or the pack_capacity is too small
+bool AP_BattMonitor_Backend::capacity_remaining_pct(uint8_t &percentage) const
 {
-    float mah_remaining = _params._pack_capacity - _state.consumed_mah;
-    if ( _params._pack_capacity > 10 ) { // a very very small battery
-        return MIN(MAX((100 * (mah_remaining) / _params._pack_capacity), 0), UINT8_MAX);
-    } else {
-        return 0;
+    // we consider anything under 10 mAh as being an invalid capacity and so will be our measurement of remaining capacity
+    if ( _params._pack_capacity <= 10) {
+        return false;
     }
+
+    // the monitor must have current readings in order to estimate consumed_mah and be healthy
+    if (!has_current() || !_state.healthy) {
+        return false;
+    }
+
+    const float mah_remaining = _params._pack_capacity - _state.consumed_mah;
+    percentage = constrain_float(100 * mah_remaining / _params._pack_capacity, 0, UINT8_MAX);
+    return true;
 }
 
 // update battery resistance estimate
@@ -98,7 +106,7 @@ float AP_BattMonitor_Backend::voltage_resting_estimate() const
     return MAX(_state.voltage, _state.voltage_resting_estimate);
 }
 
-AP_BattMonitor::BatteryFailsafe AP_BattMonitor_Backend::update_failsafes(void)
+AP_BattMonitor::Failsafe AP_BattMonitor_Backend::update_failsafes(void)
 {
     const uint32_t now = AP_HAL::millis();
 
@@ -111,7 +119,7 @@ AP_BattMonitor::BatteryFailsafe AP_BattMonitor_Backend::update_failsafes(void)
             _state.critical_voltage_start_ms = now;
         } else if (_params._low_voltage_timeout > 0 &&
                    now - _state.critical_voltage_start_ms > uint32_t(_params._low_voltage_timeout)*1000U) {
-            return AP_BattMonitor::BatteryFailsafe_Critical;
+            return AP_BattMonitor::Failsafe::Critical;
         }
     } else {
         // acceptable voltage so reset timer
@@ -119,7 +127,7 @@ AP_BattMonitor::BatteryFailsafe AP_BattMonitor_Backend::update_failsafes(void)
     }
 
     if (critical_capacity) {
-        return AP_BattMonitor::BatteryFailsafe_Critical;
+        return AP_BattMonitor::Failsafe::Critical;
     }
 
     if (low_voltage) {
@@ -128,7 +136,7 @@ AP_BattMonitor::BatteryFailsafe AP_BattMonitor_Backend::update_failsafes(void)
             _state.low_voltage_start_ms = now;
         } else if (_params._low_voltage_timeout > 0 &&
                    now - _state.low_voltage_start_ms > uint32_t(_params._low_voltage_timeout)*1000U) {
-            return AP_BattMonitor::BatteryFailsafe_Low;
+            return AP_BattMonitor::Failsafe::Low;
         }
     } else {
         // acceptable voltage so reset timer
@@ -136,11 +144,11 @@ AP_BattMonitor::BatteryFailsafe AP_BattMonitor_Backend::update_failsafes(void)
     }
 
     if (low_capacity) {
-        return AP_BattMonitor::BatteryFailsafe_Low;
+        return AP_BattMonitor::Failsafe::Low;
     }
 
     // if we've gotten this far then battery is ok
-    return AP_BattMonitor::BatteryFailsafe_None;
+    return AP_BattMonitor::Failsafe::None;
 }
 
 static bool update_check(size_t buflen, char *buffer, bool failed, const char *message)
@@ -232,13 +240,13 @@ void AP_BattMonitor_Backend::check_failsafe_types(bool &low_voltage, bool &low_c
 bool AP_BattMonitor_Backend::reset_remaining(float percentage)
 {
     percentage = constrain_float(percentage, 0, 100);
-    const float used_proportion = (100 - percentage) * 0.01;
+    const float used_proportion = (100.0f - percentage) * 0.01f;
     _state.consumed_mah = used_proportion * _params._pack_capacity;
     // without knowing the history we can't do consumed_wh
     // accurately. Best estimate is based on current voltage. This
     // will be good when resetting the battery to a value close to
     // full charge
-    _state.consumed_wh = _state.consumed_mah * 1000 * _state.voltage;
+    _state.consumed_wh = _state.consumed_mah * 0.001f * _state.voltage;
 
     // reset failsafe state for this backend
     _state.failsafe = update_failsafes();

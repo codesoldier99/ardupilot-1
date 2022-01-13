@@ -22,6 +22,23 @@
 
 #include "AP_Filesystem_Available.h"
 
+#include <AP_InternalError/AP_InternalError.h>
+
+// returned structure from a load_file() call
+class FileData {
+public:
+    uint32_t length;
+    const uint8_t *data;
+
+    FileData(void *_backend) :
+        backend(_backend) {}
+    
+    // destructor to free data
+    ~FileData();
+private:
+    const void *backend;
+};
+
 class AP_Filesystem_Backend {
 
 public:
@@ -49,4 +66,32 @@ public:
 
     // set modification time on a file
     virtual bool set_mtime(const char *filename, const uint32_t mtime_sec) { return false; }
+
+    // retry mount of filesystem if needed
+    virtual bool retry_mount(void) { return true; }
+
+    // unmount filesystem for reboot
+    virtual void unmount(void) {}
+
+    // format sdcard
+    virtual bool format(void) { return false; }
+    
+    /*
+      load a full file. Use delete to free the data
+     */
+    virtual FileData *load_file(const char *filename);
+
+    // unload data from load_file()
+    virtual void unload_file(FileData *fd);
+
+protected:
+    // return true if file operations are allowed
+    bool file_op_allowed(void) const;
 };
+
+
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+#define FS_CHECK_ALLOWED(retfail) do { if (!file_op_allowed()) { INTERNAL_ERROR(AP_InternalError::error_t::flow_of_control); return retfail; } } while(0)
+#else
+#define FS_CHECK_ALLOWED(retfail) do { if (!file_op_allowed()) { return retfail; } } while(0)
+#endif

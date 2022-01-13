@@ -3,6 +3,7 @@
 #include <AP_HAL/AP_HAL.h>
 #include <AP_Baro/AP_Baro.h>
 #include <AP_Logger/AP_Logger.h>
+#include <AP_Landing/AP_Landing.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -43,7 +44,7 @@ const AP_Param::GroupInfo AP_TECS::var_info[] = {
 
     // @Param: THR_DAMP
     // @DisplayName: Controller throttle damping
-    // @Description: Damping gain for throttle demand loop. Slows the throttle response to correct for speed and height oscillations.
+    // @Description: Damping gain for throttle demand loop. Increase to add throttle activity to dampen oscillations in speed and height.
     // @Range: 0.1 1.0
     // @Increment: 0.1
     // @User: Advanced
@@ -83,7 +84,7 @@ const AP_Param::GroupInfo AP_TECS::var_info[] = {
 
     // @Param: RLL2THR
     // @DisplayName: Bank angle compensation gain
-    // @Description: Gain from bank angle to throttle to compensate for loss of airspeed from drag in turns. Set to approximately 10x the sink rate in m/s caused by a 45-degree turn. High efficiency models may need less while less efficient aircraft may need more. Should be tuned in an automatic mission with waypoints and turns greater than 90 degrees. Tune with PTCH2SV_RLL and KFF_RDDRMIX to achieve constant airspeed, constant altitude turns.
+    // @Description: Gain from bank angle to throttle to compensate for loss of airspeed from drag in turns. Set to approximately 10x the sink rate in m/s caused by a 45-degree turn. High efficiency models may need less while less efficient aircraft may need more. Should be tuned in an automatic mission with waypoints and turns greater than 90 degrees. Tune with PTCH2SRV_RLL and KFF_RDDRMIX to achieve constant airspeed, constant altitude turns.
     // @Range: 5.0 30.0
     // @Increment: 1.0
     // @User: Advanced
@@ -110,7 +111,7 @@ const AP_Param::GroupInfo AP_TECS::var_info[] = {
     // @Description: Maximum demanded descent rate. Do not set higher than the vertical speed the aircraft can maintain at THR_MIN, TECS_PITCH_MIN, and ARSPD_FBW_MAX.
     // @Increment: 0.1
     // @Range: 0.0 20.0
-    // @User: User
+    // @User: Standard
     AP_GROUPINFO("SINK_MAX",  11, AP_TECS, _maxSinkRate, 5.0f),
 
     // @Param: LAND_ARSPD
@@ -118,7 +119,7 @@ const AP_Param::GroupInfo AP_TECS::var_info[] = {
     // @Description: When performing an autonomus landing, this value is used as the goal airspeed during approach.  Note that this parameter is not useful if your platform does not have an airspeed sensor (use TECS_LAND_THR instead).  If negative then this value is not used during landing.
     // @Range: -1 127
     // @Increment: 1
-    // @User: User
+    // @User: Standard
     AP_GROUPINFO("LAND_ARSPD", 12, AP_TECS, _landAirspeed, -1),
 
     // @Param: LAND_THR
@@ -126,7 +127,7 @@ const AP_Param::GroupInfo AP_TECS::var_info[] = {
     // @Description: Use this parameter instead of LAND_ARSPD if your platform does not have an airspeed sensor.  It is the cruise throttle during landing approach.  If this value is negative then it is disabled and TECS_LAND_ARSPD is used instead.
     // @Range: -1 100
     // @Increment: 0.1
-    // @User: User
+    // @User: Standard
     AP_GROUPINFO("LAND_THR", 13, AP_TECS, _landThrottle, -1),
 
     // @Param: LAND_SPDWGT
@@ -205,7 +206,7 @@ const AP_Param::GroupInfo AP_TECS::var_info[] = {
 
     // @Param: LAND_TDAMP
     // @DisplayName: Controller throttle damping when landing
-    // @Description: This is the damping gain for the throttle demand loop during and auto-landing. Same as TECS_THR_DAMP but only in effect during an auto-land. Increase to add damping to correct for oscillations in speed and height. When set to 0 landing throttle damp is controlled by TECS_THR_DAMP.
+    // @Description: Damping gain for the throttle demand loop during an auto-landing. Same as TECS_THR_DAMP but only in effect during an auto-land. Increase to add throttle activity to dampen oscillations in speed and height. When set to 0 landing throttle damping is controlled by TECS_THR_DAMP.
     // @Range: 0.1 1.0
     // @Increment: 0.1
     // @User: Advanced
@@ -517,6 +518,18 @@ void AP_TECS::_update_height_demand(void)
         _flare_counter = 0;
     }
 
+    // Don't allow height demand to get too far ahead of the vehicles current height
+    // if vehicle is unable to follow the demanded climb or descent
+    const bool max_climb_condition = (_pitch_dem_unc > _PITCHmaxf || _thr_clip_status == ThrClipStatus::MAX) &&
+                                     !(_flight_stage == AP_Vehicle::FixedWing::FLIGHT_TAKEOFF || _flight_stage == AP_Vehicle::FixedWing::FLIGHT_ABORT_LAND);
+    const bool max_descent_condition = _pitch_dem_unc < _PITCHminf || _thr_clip_status == ThrClipStatus::MIN;
+    if (max_climb_condition && _hgt_dem > _hgt_dem_prev) {
+        _hgt_dem = _hgt_dem_prev;
+    } else if (max_descent_condition && _hgt_dem < _hgt_dem_prev) {
+        _hgt_dem = _hgt_dem_prev;
+    }
+    _hgt_dem_prev = _hgt_dem;
+
     // for landing approach we will predict ahead by the time constant
     // plus the lag produced by the first order filter. This avoids a
     // lagged height demand while constantly descending which causes
@@ -669,8 +682,16 @@ void AP_TECS::_update_throttle_with_airspeed(void)
         }
         _throttle_dem = (_STE_error + STEdot_error * throttle_damp) * K_STE2Thr + ff_throttle;
 
-        // Constrain throttle demand
-        _throttle_dem = constrain_float(_throttle_dem, _THRminf, _THRmaxf);
+        // Constrain throttle demand and record clipping
+        if (_throttle_dem > _THRmaxf) {
+            _thr_clip_status = ThrClipStatus::MAX;
+            _throttle_dem = _THRmaxf;
+        } else if (_throttle_dem < _THRminf) {
+            _thr_clip_status = ThrClipStatus::MIN;
+            _throttle_dem = _THRminf;
+        } else {
+            _thr_clip_status = ThrClipStatus::NONE;
+        }
 
         float THRminf_clipped_to_zero = constrain_float(_THRminf, 0, _THRmaxf);
 
@@ -720,8 +741,14 @@ void AP_TECS::_update_throttle_with_airspeed(void)
         _throttle_dem = _throttle_dem + _integTHR_state;
     }
 
-    // Constrain throttle demand
-    _throttle_dem = constrain_float(_throttle_dem, _THRminf, _THRmaxf);
+    // Constrain throttle demand and record clip status
+    if (_throttle_dem > _THRmaxf) {
+        _thr_clip_status = ThrClipStatus::MAX;
+        _throttle_dem = _THRmaxf;
+    } else if (_throttle_dem < _THRminf) {
+        _thr_clip_status = ThrClipStatus::MIN;
+        _throttle_dem = _THRminf;
+    }
 }
 
 float AP_TECS::_get_i_gain(void)
@@ -770,6 +797,7 @@ void AP_TECS::_update_throttle_without_airspeed(int16_t throttle_nudge)
     if (_flags.is_gliding)
     {
         _throttle_dem = 0.0f;
+        return;
     }
 
     // Calculate additional throttle for turn drag compensation including throttle nudging
@@ -1188,7 +1216,7 @@ void AP_TECS::update_pitch_throttle(int32_t hgt_dem_cm,
     // @Field: w: current TECS prioritization of height vs speed (0==100% height,2==100% speed, 1==50%height+50%speed
     // @Field: f: flags
     // @FieldBits: f: Underspeed,UnachievableDescent,AutoLanding,ReachedTakeoffSpd
-    AP::logger().Write(
+    AP::logger().WriteStreaming(
         "TECS",
         "TimeUS,h,dh,hdem,dhdem,spdem,sp,dsp,ith,iph,th,ph,dspdem,w,f",
         "smnmnnnn----o--",
@@ -1220,15 +1248,19 @@ void AP_TECS::update_pitch_throttle(int32_t hgt_dem_cm,
     // @Field: PErr: difference between estimated potential energy and desired potential energy
     // @Field: EDelta: current error in speed/balance weighting
     // @Field: LF: aerodynamic load factor
-    AP::logger().Write("TEC2", "TimeUS,pmax,pmin,KErr,PErr,EDelta,LF",
-                       "s------",
-                       "F------",
-                       "Qffffff",
+    // @Field: hdem1: demanded height input
+    // @Field: hdem2: rate-limited height demand
+    AP::logger().WriteStreaming("TEC2", "TimeUS,pmax,pmin,KErr,PErr,EDelta,LF,hdem1,hdem2",
+                       "s------mm",
+                       "F--------",
+                       "Qffffffff",
                        now,
                        (double)degrees(_PITCHmaxf),
                        (double)degrees(_PITCHminf),
                        (double)logging.SKE_error,
                        (double)logging.SPE_error,
                        (double)logging.SEB_delta,
-                       (double)load_factor);
+                       (double)load_factor,
+                       (double)hgt_dem_cm*0.01,
+                       (double)_hgt_dem);
 }

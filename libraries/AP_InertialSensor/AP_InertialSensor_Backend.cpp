@@ -1,3 +1,5 @@
+#define AP_INLINE_VECTOR_OPS
+
 #include <AP_HAL/AP_HAL.h>
 #include "AP_InertialSensor.h"
 #include "AP_InertialSensor_Backend.h"
@@ -5,8 +7,8 @@
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #if AP_MODULE_SUPPORTED
 #include <AP_Module/AP_Module.h>
-#include <stdio.h>
 #endif
+#include <stdio.h>
 
 #define SENSOR_RATE_DEBUG 0
 
@@ -94,15 +96,34 @@ void AP_InertialSensor_Backend::_rotate_and_correct_accel(uint8_t instance, Vect
 
     // rotate for sensor orientation
     accel.rotate(_imu._accel_orientation[instance]);
-    
-    // apply offsets
-    accel -= _imu._accel_offset[instance];
 
-    // apply scaling
-    const Vector3f &accel_scale = _imu._accel_scale[instance].get();
-    accel.x *= accel_scale.x;
-    accel.y *= accel_scale.y;
-    accel.z *= accel_scale.z;
+#if HAL_INS_TEMPERATURE_CAL_ENABLE
+    if (_imu.tcal_learning) {
+        _imu.tcal[instance].update_accel_learning(accel, _imu.get_temperature(instance));
+    }
+#endif
+
+    if (!_imu._calibrating_accel && (_imu._acal == nullptr
+#if HAL_INS_ACCELCAL_ENABLED
+        || !_imu._acal->running()
+#endif
+    )) {
+
+#if HAL_INS_TEMPERATURE_CAL_ENABLE
+        // apply temperature corrections
+        _imu.tcal[instance].correct_accel(_imu.get_temperature(instance), _imu.caltemp_accel[instance], accel);
+#endif
+
+        // apply offsets
+        accel -= _imu._accel_offset[instance];
+
+
+        // apply scaling
+        const Vector3f &accel_scale = _imu._accel_scale[instance].get();
+        accel.x *= accel_scale.x;
+        accel.y *= accel_scale.y;
+        accel.z *= accel_scale.z;
+    }
 
     // rotate to body frame
     if (_imu._board_orientation == ROTATION_CUSTOM && _imu._custom_rotation) {
@@ -116,9 +137,23 @@ void AP_InertialSensor_Backend::_rotate_and_correct_gyro(uint8_t instance, Vecto
 {
     // rotate for sensor orientation
     gyro.rotate(_imu._gyro_orientation[instance]);
+
+#if HAL_INS_TEMPERATURE_CAL_ENABLE
+    if (_imu.tcal_learning) {
+        _imu.tcal[instance].update_gyro_learning(gyro, _imu.get_temperature(instance));
+    }
+#endif
     
-    // gyro calibration is always assumed to have been done in sensor frame
-    gyro -= _imu._gyro_offset[instance];
+    if (!_imu._calibrating_gyro) {
+
+#if HAL_INS_TEMPERATURE_CAL_ENABLE
+        // apply temperature corrections
+        _imu.tcal[instance].correct_gyro(_imu.get_temperature(instance), _imu.caltemp_gyro[instance], gyro);
+#endif
+
+        // gyro calibration is always assumed to have been done in sensor frame
+        gyro -= _imu._gyro_offset[instance];
+    }
 
     if (_imu._board_orientation == ROTATION_CUSTOM && _imu._custom_rotation) {
         gyro = *_imu._custom_rotation * gyro;
@@ -142,6 +177,9 @@ void AP_InertialSensor_Backend::_publish_gyro(uint8_t instance, const Vector3f &
     _imu._delta_angle[instance] = _imu._delta_angle_acc[instance];
     _imu._delta_angle_dt[instance] = _imu._delta_angle_acc_dt[instance];
     _imu._delta_angle_valid[instance] = true;
+
+    _imu._delta_angle_acc[instance].zero();
+    _imu._delta_angle_acc_dt[instance] = 0;
 }
 
 void AP_InertialSensor_Backend::_notify_new_gyro_raw_sample(uint8_t instance,
@@ -170,8 +208,8 @@ void AP_InertialSensor_Backend::_notify_new_gyro_raw_sample(uint8_t instance,
         dt = (sample_us - _imu._gyro_last_sample_us[instance]) * 1.0e-6f;
         _imu._gyro_last_sample_us[instance] = sample_us;
     } else {
-        // don't accept below 100Hz
-        if (_imu._gyro_raw_sample_rates[instance] < 100) {
+        // don't accept below 40Hz
+        if (_imu._gyro_raw_sample_rates[instance] < 40) {
             return;
         }
 
@@ -269,6 +307,127 @@ void AP_InertialSensor_Backend::_notify_new_gyro_raw_sample(uint8_t instance,
     }
 }
 
+/*
+  handle a delta-angle sample from the backend. This assumes FIFO
+  style sampling and the sample should not be rotated or corrected for
+  offsets.
+  This function should be used when the sensor driver can directly
+  provide delta-angle values from the sensor.
+ */
+void AP_InertialSensor_Backend::_notify_new_delta_angle(uint8_t instance, const Vector3f &dangle)
+{
+    if ((1U<<instance) & _imu.imu_kill_mask) {
+        return;
+    }
+    float dt;
+
+    _update_sensor_rate(_imu._sample_gyro_count[instance], _imu._sample_gyro_start_us[instance],
+                        _imu._gyro_raw_sample_rates[instance]);
+
+    uint64_t last_sample_us = _imu._gyro_last_sample_us[instance];
+
+    // don't accept below 40Hz
+    if (_imu._gyro_raw_sample_rates[instance] < 40) {
+        return;
+    }
+
+    dt = 1.0f / _imu._gyro_raw_sample_rates[instance];
+    _imu._gyro_last_sample_us[instance] = AP_HAL::micros64();
+    uint64_t sample_us = _imu._gyro_last_sample_us[instance];
+
+    Vector3f gyro = dangle / dt;
+
+    _rotate_and_correct_gyro(instance, gyro);
+
+#if AP_MODULE_SUPPORTED
+    // call gyro_sample hook if any
+    AP_Module::call_hook_gyro_sample(instance, dt, gyro);
+#endif
+
+    // push gyros if optical flow present
+    if (hal.opticalflow) {
+        hal.opticalflow->push_gyro(gyro.x, gyro.y, dt);
+    }
+    
+    // compute delta angle, including corrections
+    Vector3f delta_angle = gyro * dt;
+
+    // compute coning correction
+    // see page 26 of:
+    // Tian et al (2010) Three-loop Integration of GPS and Strapdown INS with Coning and Sculling Compensation
+    // Available: http://www.sage.unsw.edu.au/snap/publications/tian_etal2010b.pdf
+    // see also examples/coning.py
+    Vector3f delta_coning = (_imu._delta_angle_acc[instance] +
+                             _imu._last_delta_angle[instance] * (1.0f / 6.0f));
+    delta_coning = delta_coning % delta_angle;
+    delta_coning *= 0.5f;
+
+    {
+        WITH_SEMAPHORE(_sem);
+        uint64_t now = AP_HAL::micros64();
+
+        if (now - last_sample_us > 100000U) {
+            // zero accumulator if sensor was unhealthy for 0.1s
+            _imu._delta_angle_acc[instance].zero();
+            _imu._delta_angle_acc_dt[instance] = 0;
+            dt = 0;
+            delta_angle.zero();
+        }
+
+        // integrate delta angle accumulator
+        // the angles and coning corrections are accumulated separately in the
+        // referenced paper, but in simulation little difference was found between
+        // integrating together and integrating separately (see examples/coning.py)
+        _imu._delta_angle_acc[instance] += delta_angle + delta_coning;
+        _imu._delta_angle_acc_dt[instance] += dt;
+
+        // save previous delta angle for coning correction
+        _imu._last_delta_angle[instance] = delta_angle;
+        _imu._last_raw_gyro[instance] = gyro;
+#if HAL_WITH_DSP
+        // capture gyro window for FFT analysis
+        if (_imu._gyro_window_size > 0) {
+            const Vector3f& scaled_gyro = gyro * _imu._gyro_raw_sampling_multiplier[instance];
+            _imu._gyro_window[instance][0].push(scaled_gyro.x);
+            _imu._gyro_window[instance][1].push(scaled_gyro.y);
+            _imu._gyro_window[instance][2].push(scaled_gyro.z);
+        }
+#endif
+        Vector3f gyro_filtered = gyro;
+
+        // apply the notch filter
+        if (_gyro_notch_enabled()) {
+            gyro_filtered = _imu._gyro_notch_filter[instance].apply(gyro_filtered);
+        }
+
+        // apply the harmonic notch filter
+        if (gyro_harmonic_notch_enabled()) {
+            gyro_filtered = _imu._gyro_harmonic_notch_filter[instance].apply(gyro_filtered);
+        }
+
+        // apply the low pass filter last to attentuate any notch induced noise
+        gyro_filtered = _imu._gyro_filter[instance].apply(gyro_filtered);
+
+        // if the filtering failed in any way then reset the filters and keep the old value
+        if (gyro_filtered.is_nan() || gyro_filtered.is_inf()) {
+            _imu._gyro_filter[instance].reset();
+            _imu._gyro_notch_filter[instance].reset();
+            _imu._gyro_harmonic_notch_filter[instance].reset();
+        } else {
+            _imu._gyro_filtered[instance] = gyro_filtered;
+        }
+
+        _imu._new_gyro_data[instance] = true;
+    }
+
+    if (!_imu.batchsampler.doing_post_filter_logging()) {
+        log_gyro_raw(instance, sample_us, gyro);
+    }
+    else {
+        log_gyro_raw(instance, sample_us, _imu._gyro_filtered[instance]);
+    }
+}
+
 void AP_InertialSensor_Backend::log_gyro_raw(uint8_t instance, const uint64_t sample_us, const Vector3f &gyro)
 {
     AP_Logger *logger = AP_Logger::get_singleton();
@@ -277,16 +436,7 @@ void AP_InertialSensor_Backend::log_gyro_raw(uint8_t instance, const uint64_t sa
         return;
     }
     if (should_log_imu_raw()) {
-        uint64_t now = AP_HAL::micros64();
-        struct log_GYRO pkt = {
-            LOG_PACKET_HEADER_INIT((uint8_t)(LOG_GYR1_MSG+instance)),
-            time_us   : now,
-            sample_us : sample_us?sample_us:now,
-            GyrX      : gyro.x,
-            GyrY      : gyro.y,
-            GyrZ      : gyro.z
-        };
-        logger->WriteBlock(&pkt, sizeof(pkt));
+        Write_GYR(instance, sample_us, gyro);
     } else {
         if (!_imu.batchsampler.doing_sensor_rate_logging()) {
             _imu.batchsampler.sample(instance, AP_InertialSensor::IMU_SENSOR_TYPE_GYRO, sample_us, gyro);
@@ -310,21 +460,15 @@ void AP_InertialSensor_Backend::_publish_accel(uint8_t instance, const Vector3f 
     _imu._delta_velocity_dt[instance] = _imu._delta_velocity_acc_dt[instance];
     _imu._delta_velocity_valid[instance] = true;
 
+    _imu._delta_velocity_acc[instance].zero();
+    _imu._delta_velocity_acc_dt[instance] = 0;
 
     if (_imu._accel_calibrator != nullptr && _imu._accel_calibrator[instance].get_status() == ACCEL_CAL_COLLECTING_SAMPLE) {
         Vector3f cal_sample = _imu._delta_velocity[instance];
 
-        //remove rotation
+        // remove rotation. Note that we don't need to remove offsets or scale factor as those
+        // are not applied when calibrating
         cal_sample.rotate_inverse(_imu._board_orientation);
-
-        // remove scale factors
-        const Vector3f &accel_scale = _imu._accel_scale[instance].get();
-        cal_sample.x /= accel_scale.x;
-        cal_sample.y /= accel_scale.y;
-        cal_sample.z /= accel_scale.z;
-        
-        //remove offsets
-        cal_sample += _imu._accel_offset[instance].get() * _imu._delta_velocity_dt[instance] ;
 
         _imu._accel_calibrator[instance].new_sample(cal_sample, _imu._delta_velocity_dt[instance]);
     }
@@ -357,8 +501,8 @@ void AP_InertialSensor_Backend::_notify_new_accel_raw_sample(uint8_t instance,
         dt = (sample_us - _imu._accel_last_sample_us[instance]) * 1.0e-6f;
         _imu._accel_last_sample_us[instance] = sample_us;
     } else {
-        // don't accept below 100Hz
-        if (_imu._accel_raw_sample_rates[instance] < 100) {
+        // don't accept below 40Hz
+        if (_imu._accel_raw_sample_rates[instance] < 40) {
             return;
         }
 
@@ -407,6 +551,79 @@ void AP_InertialSensor_Backend::_notify_new_accel_raw_sample(uint8_t instance,
     }
 }
 
+/*
+  handle a delta-velocity sample from the backend. This assumes FIFO style sampling and
+  the sample should not be rotated or corrected for offsets
+
+  This function should be used when the sensor driver can directly
+  provide delta-velocity values from the sensor.
+ */
+void AP_InertialSensor_Backend::_notify_new_delta_velocity(uint8_t instance, const Vector3f &dvel)
+{
+    if ((1U<<instance) & _imu.imu_kill_mask) {
+        return;
+    }
+    float dt;
+
+    _update_sensor_rate(_imu._sample_accel_count[instance], _imu._sample_accel_start_us[instance],
+                        _imu._accel_raw_sample_rates[instance]);
+
+    uint64_t last_sample_us = _imu._accel_last_sample_us[instance];
+
+    // don't accept below 40Hz
+    if (_imu._accel_raw_sample_rates[instance] < 40) {
+        return;
+    }
+
+    dt = 1.0f / _imu._accel_raw_sample_rates[instance];
+    _imu._accel_last_sample_us[instance] = AP_HAL::micros64();
+    uint64_t sample_us = _imu._accel_last_sample_us[instance];
+
+    Vector3f accel = dvel / dt;
+
+    _rotate_and_correct_accel(instance, accel);
+
+#if AP_MODULE_SUPPORTED
+    // call accel_sample hook if any
+    AP_Module::call_hook_accel_sample(instance, dt, accel, false);
+#endif    
+    
+    _imu.calc_vibration_and_clipping(instance, accel, dt);
+
+    {
+        WITH_SEMAPHORE(_sem);
+
+        uint64_t now = AP_HAL::micros64();
+
+        if (now - last_sample_us > 100000U) {
+            // zero accumulator if sensor was unhealthy for 0.1s
+            _imu._delta_velocity_acc[instance].zero();
+            _imu._delta_velocity_acc_dt[instance] = 0;
+            dt = 0;
+        }
+        
+        // delta velocity including corrections
+        _imu._delta_velocity_acc[instance] += accel * dt;
+        _imu._delta_velocity_acc_dt[instance] += dt;
+
+        _imu._accel_filtered[instance] = _imu._accel_filter[instance].apply(accel);
+        if (_imu._accel_filtered[instance].is_nan() || _imu._accel_filtered[instance].is_inf()) {
+            _imu._accel_filter[instance].reset();
+        }
+
+        _imu.set_accel_peak_hold(instance, _imu._accel_filtered[instance]);
+
+        _imu._new_accel_data[instance] = true;
+    }
+
+    if (!_imu.batchsampler.doing_post_filter_logging()) {
+        log_accel_raw(instance, sample_us, accel);
+    } else {
+        log_accel_raw(instance, sample_us, _imu._accel_filtered[instance]);
+    }
+}
+
+
 void AP_InertialSensor_Backend::_notify_new_accel_sensor_rate_sample(uint8_t instance, const Vector3f &accel)
 {
     if (!_imu.batchsampler.doing_sensor_rate_logging()) {
@@ -432,16 +649,7 @@ void AP_InertialSensor_Backend::log_accel_raw(uint8_t instance, const uint64_t s
         return;
     }
     if (should_log_imu_raw()) {
-        uint64_t now = AP_HAL::micros64();
-        struct log_ACCEL pkt = {
-            LOG_PACKET_HEADER_INIT((uint8_t)(LOG_ACC1_MSG+instance)),
-            time_us   : now,
-            sample_us : sample_us?sample_us:now,
-            AccX      : accel.x,
-            AccY      : accel.y,
-            AccZ      : accel.z
-        };
-        logger->WriteBlock(&pkt, sizeof(pkt));
+        Write_ACC(instance, sample_us, accel);
     } else {
         if (!_imu.batchsampler.doing_sensor_rate_logging()) {
             _imu.batchsampler.sample(instance, AP_InertialSensor::IMU_SENSOR_TYPE_ACCEL, sample_us, accel);
@@ -598,3 +806,13 @@ bool AP_InertialSensor_Backend::should_log_imu_raw() const
     return true;
 }
 
+// log an unexpected change in a register for an IMU
+void AP_InertialSensor_Backend::log_register_change(uint32_t bus_id, const AP_HAL::Device::checkreg &reg)
+{
+    AP::logger().Write("IREG", "TimeUS,DevID,Bank,Reg,Val", "QIBBB",
+                       AP_HAL::micros64(),
+                       bus_id,
+                       reg.bank,
+                       reg.regnum,
+                       reg.value);
+}

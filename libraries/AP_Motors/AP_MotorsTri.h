@@ -60,10 +60,11 @@ protected:
 
     // call vehicle supplied thrust compensation if set
     void                thrust_compensation(void) override;
-    
+
+    const char* _get_frame_string() const override { return "TRI"; }
+
     // parameters
 
-    SRV_Channel     *_yaw_servo; // yaw output channel
     float           _pivot_angle;                       // Angle of yaw pivot
     float           _thrust_right;
     float           _thrust_rear;

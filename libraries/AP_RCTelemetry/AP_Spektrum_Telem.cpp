@@ -31,8 +31,6 @@
 #include <AP_Common/Location.h>
 #include <AP_GPS/AP_GPS.h>
 #include <AP_Baro/AP_Baro.h>
-#include <AP_GPS/AP_GPS.h>
-#include <GCS_MAVLink/GCS.h>
 #include <AP_RTC/AP_RTC.h>
 #ifdef HAVE_AP_BLHELI_SUPPORT
 #include <AP_BLheli/AP_BLHeli.h>
@@ -68,7 +66,7 @@ AP_Spektrum_Telem::~AP_Spektrum_Telem(void)
 bool AP_Spektrum_Telem::init(void)
 {
     // sanity check that we are using a UART for RC input
-    if (!AP::serialmanager().find_serial(AP_SerialManager::SerialProtocol_RCIN, 0)) {
+    if (!AP::serialmanager().have_serial(AP_SerialManager::SerialProtocol_RCIN, 0)) {
         return false;
     }
     return AP_RCTelemetry::init();
@@ -435,7 +433,7 @@ void AP_Spektrum_Telem::calc_airspeed()
     AP_AHRS &ahrs = AP::ahrs();
     WITH_SEMAPHORE(ahrs.get_semaphore());
 
-    const AP_Airspeed *airspeed = ahrs.get_airspeed();
+    const AP_Airspeed *airspeed = AP::airspeed();
     float speed = 0.0f;
     if (airspeed && airspeed->healthy()) {
         speed = roundf(airspeed->get_airspeed() * 3.6);

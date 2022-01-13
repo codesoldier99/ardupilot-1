@@ -17,12 +17,16 @@
 */
 
 #include "SIM_Ship.h"
+
+#if AP_SIM_SHIP_ENABLED
+
 #include "SITL.h"
 
 #include <stdio.h>
 
 #include "SIM_Aircraft.h"
 #include <AP_HAL_SITL/SITL_State.h>
+#include <AP_Terrain/AP_Terrain.h>
 
 // use a spare channel for send. This is static to avoid mavlink
 // header import in SIM_Ship.h
@@ -174,21 +178,15 @@ void ShipSim::send_report(void)
     Location loc = home;
     loc.offset(ship.position.x, ship.position.y);
 
-    int32_t alt;
-    bool have_alt = false;
+    int32_t alt_mm = home.alt * 10;  // assume home altitude
 
 #if AP_TERRAIN_AVAILABLE
-    auto &terrain = AP::terrain();
+    auto terrain = AP::terrain();
     float height;
-    if (terrain.enabled() && terrain.height_amsl(loc, height, true)) {
-        alt = height * 1000;
-        have_alt = true;
+    if (terrain != nullptr && terrain->enabled() && terrain->height_amsl(loc, height, true)) {
+        alt_mm = height * 1000;
     }
 #endif
-    if (!have_alt) {
-        // assume home altitude
-        alt = home.alt;
-    }
 
     Vector2f vel(ship.speed, 0);
     vel.rotate(radians(ship.heading_deg));
@@ -200,7 +198,7 @@ void ShipSim::send_report(void)
                                               now,
                                               loc.lat,
                                               loc.lng,
-                                              alt,
+                                              alt_mm,
                                               0,
                                               vel.x*100,
                                               vel.y*100,
@@ -211,3 +209,5 @@ void ShipSim::send_report(void)
         mav_socket.send(buf, len);
     }
 }
+
+#endif

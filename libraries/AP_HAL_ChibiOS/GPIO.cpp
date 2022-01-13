@@ -18,8 +18,22 @@
 
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include "hwdef/common/stm32_util.h"
+#include <AP_InternalError/AP_InternalError.h>
+#ifndef HAL_BOOTLOADER_BUILD
+#include <SRV_Channel/SRV_Channel.h>
+#endif
+#ifndef HAL_NO_UARTDRIVER
+#include <GCS_MAVLink/GCS.h>
+#endif
+#include <AP_Vehicle/AP_Vehicle_Type.h>
 
 using namespace ChibiOS;
+
+#if HAL_WITH_IO_MCU
+#include <AP_IOMCU/AP_IOMCU.h>
+extern AP_IOMCU iomcu;
+#endif
+
 
 // GPIO pin table from hwdef.dat
 static struct gpio_entry {
@@ -31,10 +45,8 @@ static struct gpio_entry {
     bool is_input;
     uint8_t mode;
     thread_reference_t thd_wait;
+    uint16_t isr_quota;
 } _gpio_tab[] = HAL_GPIO_PINS;
-
-#define NUM_PINS ARRAY_SIZE(_gpio_tab)
-#define PIN_ENABLED(pin) ((pin)<NUM_PINS && _gpio_tab[pin].enabled)
 
 /*
   map a user pin number to a GPIO table entry
@@ -42,8 +54,9 @@ static struct gpio_entry {
 static struct gpio_entry *gpio_by_pin_num(uint8_t pin_num, bool check_enabled=true)
 {
     for (uint8_t i=0; i<ARRAY_SIZE(_gpio_tab); i++) {
-        if (pin_num == _gpio_tab[i].pin_num) {
-            if (check_enabled && !_gpio_tab[i].enabled) {
+        const auto &t = _gpio_tab[i];
+        if (pin_num == t.pin_num) {
+            if (check_enabled && t.pwm_num != 0 && !t.enabled) {
                 return NULL;
             }
             return &_gpio_tab[i];
@@ -60,20 +73,37 @@ GPIO::GPIO()
 
 void GPIO::init()
 {
+#if !APM_BUILD_TYPE(APM_BUILD_iofirmware) && !defined(HAL_BOOTLOADER_BUILD)
+    uint8_t chan_offset = 0;
+#if HAL_WITH_IO_MCU
+    if (AP_BoardConfig::io_enabled()) {
+        uint8_t GPIO_mask = 0;
+        for (uint8_t i=0; i<8; i++) {
+            if (SRV_Channels::is_GPIO(i)) {
+                GPIO_mask |= 1U << i;
+            }
+        }
+        iomcu.set_GPIO_mask(GPIO_mask);
+        chan_offset = 8;
+    }
+#endif
     // auto-disable pins being used for PWM output based on BRD_PWM_COUNT parameter
-    uint8_t pwm_count = AP_BoardConfig::get_pwm_count();
     for (uint8_t i=0; i<ARRAY_SIZE(_gpio_tab); i++) {
         struct gpio_entry *g = &_gpio_tab[i];
         if (g->pwm_num != 0) {
-            g->enabled = g->pwm_num > pwm_count;
+            g->enabled = SRV_Channels::is_GPIO((g->pwm_num-1)+chan_offset);
         }
     }
+#endif // HAL_BOOTLOADER_BUILD
 #ifdef HAL_PIN_ALT_CONFIG
     setup_alt_config();
 #endif
 }
 
 #ifdef HAL_PIN_ALT_CONFIG
+// chosen alternative config
+uint8_t GPIO::alt_config;
+
 /*
   alternative config table, selected using BRD_ALT_CONFIG
  */
@@ -81,6 +111,8 @@ static const struct alt_config {
     uint8_t alternate;
     uint16_t mode;
     ioline_t line;
+    PERIPH_TYPE periph_type;
+    uint8_t periph_instance;
 } alternate_config[] HAL_PIN_ALT_CONFIG;
 
 /*
@@ -92,21 +124,69 @@ void GPIO::setup_alt_config(void)
     if (!bc) {
         return;
     }
-    const uint8_t alt = bc->get_alt_config();
-    if (alt == 0) {
+    alt_config = bc->get_alt_config();
+    if (alt_config == 0) {
         // use defaults
         return;
     }
     for (uint8_t i=0; i<ARRAY_SIZE(alternate_config); i++) {
-        if (alt == alternate_config[i].alternate) {
-            const iomode_t mode = alternate_config[i].mode & ~PAL_STM32_HIGH;
-            const uint8_t odr = (alternate_config[i].mode & PAL_STM32_HIGH)?1:0;
-            palSetLineMode(alternate_config[i].line, mode);
-            palWriteLine(alternate_config[i].line, odr);
+        const struct alt_config &alt = alternate_config[i];
+        if (alt_config == alt.alternate) {
+            if (alt.periph_type == PERIPH_TYPE::GPIO) {
+                // enable pin in GPIO table
+                for (uint8_t j=0; j<ARRAY_SIZE(_gpio_tab); j++) {
+                    struct gpio_entry *g = &_gpio_tab[j];
+                    if (g->pal_line == alt.line) {
+                        g->enabled = true;
+                        break;
+                    }
+                }
+                continue;
+            }
+            const iomode_t mode = alt.mode & ~PAL_STM32_HIGH;
+            const uint8_t odr = (alt.mode & PAL_STM32_HIGH)?1:0;
+            palSetLineMode(alt.line, mode);
+            palWriteLine(alt.line, odr);
         }
     }
 }
 #endif // HAL_PIN_ALT_CONFIG
+
+/*
+  resolve an ioline_t to take account of alternative
+  configurations. This allows drivers to get the right ioline_t for an
+  alternative config. Note that this may return 0, meaning the pin is
+  not mapped to this peripheral in the active config
+*/
+ioline_t GPIO::resolve_alt_config(ioline_t base, PERIPH_TYPE ptype, uint8_t instance)
+{
+#ifdef HAL_PIN_ALT_CONFIG
+    if (alt_config == 0) {
+        // unchanged
+        return base;
+    }
+    for (uint8_t i=0; i<ARRAY_SIZE(alternate_config); i++) {
+        const struct alt_config &alt = alternate_config[i];
+        if (alt_config == alt.alternate) {
+            if (ptype == alt.periph_type && instance == alt.periph_instance) {
+                // we've reconfigured this peripheral with a different line
+                return alt.line;
+            }
+        }
+    }
+    // now search for pins that have been configured off via BRD_ALT_CONFIG
+    for (uint8_t i=0; i<ARRAY_SIZE(alternate_config); i++) {
+        const struct alt_config &alt = alternate_config[i];
+        if (alt_config == alt.alternate) {
+            if (alt.line == base) {
+                // this line is no longer available in this config
+                return 0;
+            }
+        }
+    }
+#endif
+    return base;
+}
 
 
 void GPIO::pinMode(uint8_t pin, uint8_t output)
@@ -120,7 +200,7 @@ void GPIO::pinMode(uint8_t pin, uint8_t output)
             return;
         }
         g->mode = output?PAL_MODE_OUTPUT_PUSHPULL:PAL_MODE_INPUT;
-#if defined(STM32F7) || defined(STM32H7) || defined(STM32F4)
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32F4) || defined(STM32G4) || defined(STM32L4)
         if (g->mode == PAL_MODE_OUTPUT_PUSHPULL) {
             // retain OPENDRAIN if already set
             iomode_t old_mode = palReadLineMode(g->pal_line);
@@ -146,6 +226,12 @@ uint8_t GPIO::read(uint8_t pin)
 
 void GPIO::write(uint8_t pin, uint8_t value)
 {
+#if HAL_WITH_IO_MCU
+    if (AP_BoardConfig::io_enabled() && iomcu.valid_GPIO_pin(pin)) {
+        iomcu.write_GPIO(pin, value);
+        return;
+    }
+#endif
     struct gpio_entry *g = gpio_by_pin_num(pin);
     if (g) {
         if (g->is_input) {
@@ -162,6 +248,12 @@ void GPIO::write(uint8_t pin, uint8_t value)
 
 void GPIO::toggle(uint8_t pin)
 {
+#if HAL_WITH_IO_MCU
+    if (AP_BoardConfig::io_enabled() && iomcu.valid_GPIO_pin(pin)) {
+        iomcu.toggle_GPIO(pin);
+        return;
+    }
+#endif
     struct gpio_entry *g = gpio_by_pin_num(pin);
     if (g) {
         palToggleLine(g->pal_line);
@@ -171,6 +263,11 @@ void GPIO::toggle(uint8_t pin)
 /* Alternative interface: */
 AP_HAL::DigitalSource* GPIO::channel(uint16_t pin)
 {
+#if HAL_WITH_IO_MCU
+    if (AP_BoardConfig::io_enabled() && iomcu.valid_GPIO_pin(pin)) {
+        return new IOMCU_DigitalSource(pin);
+    }
+#endif
     struct gpio_entry *g = gpio_by_pin_num(pin);
     if (!g) {
         return nullptr;
@@ -294,6 +391,22 @@ void DigitalSource::toggle()
     palToggleLine(line);
 }
 
+#if HAL_WITH_IO_MCU
+IOMCU_DigitalSource::IOMCU_DigitalSource(uint8_t _pin) :
+    pin(_pin)
+{}
+
+void IOMCU_DigitalSource::write(uint8_t value)
+{
+    iomcu.write_GPIO(pin, value);
+}
+
+void IOMCU_DigitalSource::toggle()
+{
+    iomcu.toggle_GPIO(pin);
+}
+#endif // HAL_WITH_IO_MCU
+
 static void pal_interrupt_cb(void *arg)
 {
     if (arg != nullptr) {
@@ -312,6 +425,21 @@ static void pal_interrupt_cb_functor(void *arg)
     }
     if (!(g->fn)) {
         return;
+    }
+    if (g->isr_quota >= 1) {
+        /*
+          we have an interrupt quota enabled for this pin. If the
+          quota remaining drops to 1 without it being refreshed in
+          timer_tick then we disable the interrupt source. This is to
+          prevent CPU overload due to very high GPIO interrupt counts
+         */
+        if (g->isr_quota == 1) {
+            osalSysLockFromISR();
+            palDisableLineEventI(g->pal_line);
+            osalSysUnlockFromISR();
+            return;
+        }
+        g->isr_quota--;
     }
     (g->fn)(g->pin_num, palReadLine(g->pal_line), now);
 }
@@ -366,3 +494,61 @@ bool GPIO::wait_pin(uint8_t pin, INTERRUPT_TRIGGER_TYPE mode, uint32_t timeout_u
 
     return msg == MSG_OK;
 }
+
+// check if a pin number is valid
+bool GPIO::valid_pin(uint8_t pin) const
+{
+#if HAL_WITH_IO_MCU
+    if (AP_BoardConfig::io_enabled() && iomcu.valid_GPIO_pin(pin)) {
+        return true;
+    }
+#endif
+    return gpio_by_pin_num(pin) != nullptr;
+}
+
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32F4) || defined(STM32F3) || defined(STM32G4) || defined(STM32L4)
+
+// allow for save and restore of pin settings
+bool GPIO::get_mode(uint8_t pin, uint32_t &mode)
+{
+    auto *p = gpio_by_pin_num(pin);
+    if (!p) {
+        return false;
+    }
+    mode = uint32_t(palReadLineMode(p->pal_line));
+    return true;
+}
+
+void GPIO::set_mode(uint8_t pin, uint32_t mode)
+{
+    auto *p = gpio_by_pin_num(pin);
+    if (p) {
+        palSetLineMode(p->pal_line, ioline_t(mode));
+    }
+}
+#endif
+
+#ifndef IOMCU_FW
+/*
+  timer to setup interrupt quotas for a 100ms period from
+  monitor thread
+*/
+void GPIO::timer_tick()
+{
+    // allow 100k interrupts/second max for GPIO interrupt sources, which is
+    // 10k per 100ms call to timer_tick()
+    const uint16_t quota = 10000U;
+    for (uint8_t i=0; i<ARRAY_SIZE(_gpio_tab); i++) {
+        if (_gpio_tab[i].isr_quota == 1) {
+            // we ran out of ISR quota for this pin since the last
+            // check. This is not really an internal error, but we use
+            // INTERNAL_ERROR() to get the reporting mechanism
+#ifndef HAL_NO_UARTDRIVER
+            GCS_SEND_TEXT(MAV_SEVERITY_ERROR,"ISR flood on pin %u", _gpio_tab[i].pin_num);
+#endif
+            INTERNAL_ERROR(AP_InternalError::error_t::gpio_isr);
+        }
+        _gpio_tab[i].isr_quota = quota;
+    }
+}
+#endif // IOMCU_FW

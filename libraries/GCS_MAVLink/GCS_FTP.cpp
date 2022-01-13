@@ -20,6 +20,7 @@
 
 #include <AP_Filesystem/AP_Filesystem.h>
 #include <AP_HAL/utility/sparse-endian.h>
+#include <AP_BoardConfig/AP_BoardConfig.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -29,7 +30,15 @@ struct GCS_MAVLINK::ftp_state GCS_MAVLINK::ftp;
 #define FTP_SESSION_TIMEOUT 3000
 
 bool GCS_MAVLINK::ftp_init(void) {
+
+    // check if ftp is disabled for memory savings
+#if !defined(HAL_BUILD_AP_PERIPH)
+    if (AP_BoardConfig::ftp_disabled()) {
+        goto failed;
+    }
+#endif
     // we can simply check if we allocated everything we need
+
     if (ftp.requests != nullptr) {
         return true;
     }
@@ -44,7 +53,7 @@ bool GCS_MAVLINK::ftp_init(void) {
     }
 
     if (!hal.scheduler->thread_create(FUNCTOR_BIND_MEMBER(&GCS_MAVLINK::ftp_worker, void),
-                                      "FTP", 3072, AP_HAL::Scheduler::PRIORITY_IO, 0)) {
+                                      "FTP", 2560, AP_HAL::Scheduler::PRIORITY_IO, 0)) {
         goto failed;
     }
 
@@ -55,6 +64,7 @@ failed:
     ftp.requests = nullptr;
     delete ftp.replies;
     ftp.replies = nullptr;
+    gcs().send_text(MAV_SEVERITY_WARNING, "failed to initialize MAVFTP");
 
     return false;
 }
@@ -576,9 +586,9 @@ int GCS_MAVLINK::gen_dir_entry(char *dest, size_t space, const char *path, const
         if (AP::FS().stat(full_path, &st)) {
             return -1;
         }
-        return hal.util->snprintf(dest, space, "F%s\t%u\0", entry->d_name, (unsigned)st.st_size);
+        return hal.util->snprintf(dest, space, "F%s\t%u%c", entry->d_name, (unsigned)st.st_size, (char)0);
     } else {
-        return hal.util->snprintf(dest, space, "D%s\0", entry->d_name);
+        return hal.util->snprintf(dest, space, "D%s%c", entry->d_name, (char)0);
     }
 }
 

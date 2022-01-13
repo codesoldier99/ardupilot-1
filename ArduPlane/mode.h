@@ -3,8 +3,14 @@
 #include <AP_Param/AP_Param.h>
 #include <AP_Common/Location.h>
 #include <stdint.h>
-#include <AP_Common/Location.h>
+#include <AP_Soaring/AP_Soaring.h>
+#include <AP_ADSB/AP_ADSB.h>
+#include <AP_Vehicle/ModeReason.h>
+#include "quadplane.h"
 
+class AC_PosControl;
+class AC_AttitudeControl_Multi;
+class AC_Loiter;
 class Mode
 {
 public:
@@ -32,13 +38,21 @@ public:
         AVOID_ADSB    = 14,
         GUIDED        = 15,
         INITIALISING  = 16,
+#if HAL_QUADPLANE_ENABLED
         QSTABILIZE    = 17,
         QHOVER        = 18,
         QLOITER       = 19,
         QLAND         = 20,
         QRTL          = 21,
+#if QAUTOTUNE_ENABLED
         QAUTOTUNE     = 22,
+#endif
         QACRO         = 23,
+#endif
+        THERMAL       = 24,
+#if HAL_QUADPLANE_ENABLED
+        LOITER_ALT_QLAND = 25,
+#endif
     };
 
     // Constructor
@@ -50,6 +64,9 @@ public:
     // perform any cleanups required:
     void exit();
 
+    // run controllers specific to this mode
+    virtual void run() {};
+
     // returns a unique number specific to this mode
     virtual Number mode_number() const = 0;
 
@@ -58,6 +75,9 @@ public:
 
     // returns a string for this flightmode, exactly 4 bytes
     virtual const char *name4() const = 0;
+
+    // returns true if the vehicle can be armed in this mode
+    virtual bool allows_arming() const { return true; }
 
     //
     // methods that sub classes should override to affect movement of the vehicle in this mode
@@ -68,14 +88,38 @@ public:
 
     // true for all q modes
     virtual bool is_vtol_mode() const { return false; }
-    virtual bool is_vtol_man_throttle() const { return false; }
+    virtual bool is_vtol_man_throttle() const;
     virtual bool is_vtol_man_mode() const { return false; }
+
+    // guided or adsb mode
+    virtual bool is_guided_mode() const { return false; }
 
     // true if mode can have terrain following disabled by switch
     virtual bool allows_terrain_disable() const { return false; }
 
+    // true if automatic switch to thermal mode is supported.
+    virtual bool does_automatic_thermal_switch() const {return false; }
+
     // subclasses override this if they require navigation.
     virtual void navigate() { return; }
+
+    // this allows certain flight modes to mix RC input with throttle
+    // depending on airspeed_nudge_cm
+    virtual bool allows_throttle_nudging() const { return false; }
+
+    // true if the mode sets the vehicle destination, which controls
+    // whether control input is ignored with STICK_MIXING=0
+    virtual bool does_auto_navigation() const { return false; }
+
+    // true if the mode sets the vehicle destination, which controls
+    // whether control input is ignored with STICK_MIXING=0
+    virtual bool does_auto_throttle() const { return false; }
+
+    // method for mode specific target altitude profiles
+    virtual bool update_target_altitude() { return false; }
+
+    // handle a guided target request from GCS
+    virtual bool handle_guided_request(Location target_loc) { return false; }
 
 protected:
 
@@ -84,6 +128,15 @@ protected:
 
     // subclasses override this to perform any required cleanup when exiting the mode
     virtual void _exit() { return; }
+
+#if HAL_QUADPLANE_ENABLED
+    // References for convenience, used by QModes
+    AC_PosControl*& pos_control;
+    AC_AttitudeControl_Multi*& attitude_control;
+    AC_Loiter*& loiter_nav;
+    QuadPlane& quadplane;
+    QuadPlane::PosControlState &poscontrol;
+#endif
 };
 
 
@@ -111,10 +164,18 @@ public:
     const char *name() const override { return "AUTO"; }
     const char *name4() const override { return "AUTO"; }
 
+    bool does_automatic_thermal_switch() const override { return true; }
+
     // methods that affect movement of the vehicle in this mode
     void update() override;
 
     void navigate() override;
+
+    bool allows_throttle_nudging() const override { return true; }
+
+    bool does_auto_navigation() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
 
 protected:
 
@@ -153,6 +214,17 @@ public:
 
     void navigate() override;
 
+    virtual bool is_guided_mode() const override { return true; }
+
+    bool allows_throttle_nudging() const override { return true; }
+
+    bool does_auto_navigation() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
+
+    // handle a guided target request from GCS
+    bool handle_guided_request(Location target_loc) override;
+
 protected:
 
     bool _enter() override;
@@ -168,6 +240,10 @@ public:
 
     // methods that affect movement of the vehicle in this mode
     void update() override;
+
+    bool does_auto_navigation() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
 
 protected:
 
@@ -190,10 +266,39 @@ public:
     bool isHeadingLinedUp(const Location loiterCenterLoc, const Location targetLoc);
     bool isHeadingLinedUp_cd(const int32_t bearing_cd);
 
+    bool allows_throttle_nudging() const override { return true; }
+
+    bool does_auto_navigation() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
+
 protected:
 
     bool _enter() override;
 };
+
+#if HAL_QUADPLANE_ENABLED
+class ModeLoiterAltQLand : public ModeLoiter
+{
+public:
+
+    Number mode_number() const override { return Number::LOITER_ALT_QLAND; }
+    const char *name() const override { return "Loiter to QLAND"; }
+    const char *name4() const override { return "L2QL"; }
+
+    // handle a guided target request from GCS
+    bool handle_guided_request(Location target_loc) override;
+
+protected:
+    bool _enter() override;
+
+    void navigate() override;
+
+private:
+    void switch_qland();
+
+};
+#endif // HAL_QUADPLANE_ENABLED
 
 class ModeManual : public Mode
 {
@@ -205,11 +310,6 @@ public:
 
     // methods that affect movement of the vehicle in this mode
     void update() override;
-
-protected:
-
-    bool _enter() override;
-    void _exit() override;
 };
 
 
@@ -226,9 +326,20 @@ public:
 
     void navigate() override;
 
+    bool allows_throttle_nudging() const override { return true; }
+
+    bool does_auto_navigation() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
+
 protected:
 
     bool _enter() override;
+
+private:
+
+    // Switch to QRTL if enabled and within radius
+    bool switch_QRTL(bool check_loiter_target = true);
 };
 
 class ModeStabilize : public Mode
@@ -241,10 +352,6 @@ public:
 
     // methods that affect movement of the vehicle in this mode
     void update() override;
-
-protected:
-
-    bool _enter() override;
 };
 
 class ModeTraining : public Mode
@@ -257,10 +364,6 @@ public:
 
     // methods that affect movement of the vehicle in this mode
     void update() override;
-
-protected:
-
-    bool _enter() override;
 };
 
 class ModeInitializing : public Mode
@@ -271,12 +374,16 @@ public:
     const char *name() const override { return "INITIALISING"; }
     const char *name4() const override { return "INIT"; }
 
+    bool _enter() override { return false; }
+
     // methods that affect movement of the vehicle in this mode
     void update() override { }
 
-protected:
+    bool allows_arming() const override { return false; }
 
-    bool _enter() override;
+    bool allows_throttle_nudging() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
 };
 
 class ModeFBWA : public Mode
@@ -290,10 +397,6 @@ public:
     // methods that affect movement of the vehicle in this mode
     void update() override;
 
-    bool _enter() override;
-
-protected:
-
 };
 
 class ModeFBWB : public Mode
@@ -306,8 +409,12 @@ public:
 
     bool allows_terrain_disable() const override { return true; }
 
+    bool does_automatic_thermal_switch() const override { return true; }
+
     // methods that affect movement of the vehicle in this mode
     void update() override;
+
+    bool does_auto_throttle() const override { return true; }
 
 protected:
 
@@ -324,12 +431,16 @@ public:
 
     bool allows_terrain_disable() const override { return true; }
 
+    bool does_automatic_thermal_switch() const override { return true; }
+
     // methods that affect movement of the vehicle in this mode
     void update() override;
 
     void navigate() override;
 
-    bool get_target_heading_cd(int32_t &target_heading);
+    bool get_target_heading_cd(int32_t &target_heading) const;
+
+    bool does_auto_throttle() const override { return true; }
 
 protected:
 
@@ -340,6 +451,7 @@ protected:
     uint32_t lock_timer_ms;
 };
 
+#if HAL_ADSB_ENABLED
 class ModeAvoidADSB : public Mode
 {
 public:
@@ -352,11 +464,18 @@ public:
     void update() override;
 
     void navigate() override;
+
+    virtual bool is_guided_mode() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
+
 protected:
 
     bool _enter() override;
 };
+#endif
 
+#if HAL_QUADPLANE_ENABLED
 class ModeQStabilize : public Mode
 {
 public:
@@ -368,6 +487,7 @@ public:
     bool is_vtol_mode() const override { return true; }
     bool is_vtol_man_throttle() const override { return true; }
     virtual bool is_vtol_man_mode() const override { return true; }
+    bool allows_throttle_nudging() const override { return true; }
 
     // methods that affect movement of the vehicle in this mode
     void update() override;
@@ -375,7 +495,13 @@ public:
     // used as a base class for all Q modes
     bool _enter() override;
 
+    void run() override;
+
 protected:
+private:
+
+    void set_tailsitter_roll_pitch(const float roll_input, const float pitch_input);
+    void set_limited_roll_pitch(const float roll_input, const float pitch_input);
 
 };
 
@@ -393,6 +519,8 @@ public:
     // methods that affect movement of the vehicle in this mode
     void update() override;
 
+    void run() override;
+
 protected:
 
     bool _enter() override;
@@ -400,6 +528,8 @@ protected:
 
 class ModeQLoiter : public Mode
 {
+friend class QuadPlane;
+friend class ModeQLand;
 public:
 
     Number mode_number() const override { return Number::QLOITER; }
@@ -411,6 +541,8 @@ public:
 
     // methods that affect movement of the vehicle in this mode
     void update() override;
+
+    void run() override;
 
 protected:
 
@@ -430,6 +562,10 @@ public:
     // methods that affect movement of the vehicle in this mode
     void update() override;
 
+    void run() override;
+
+    bool allows_arming() const override { return false; }
+
 protected:
 
     bool _enter() override;
@@ -448,6 +584,16 @@ public:
     // methods that affect movement of the vehicle in this mode
     void update() override;
 
+    void run() override;
+
+    bool allows_arming() const override { return false; }
+
+    bool does_auto_throttle() const override { return true; }
+
+    bool update_target_altitude() override;
+
+    bool allows_throttle_nudging() const override;
+
 protected:
 
     bool _enter() override;
@@ -463,15 +609,19 @@ public:
 
     bool is_vtol_mode() const override { return true; }
     bool is_vtol_man_throttle() const override { return true; }
+    virtual bool is_vtol_man_mode() const override { return true; }
 
     // methods that affect movement of the vehicle in this mode
     void update() override;
+
+    void run() override;
 
 protected:
 
     bool _enter() override;
 };
 
+#if QAUTOTUNE_ENABLED
 class ModeQAutotune : public Mode
 {
 public:
@@ -483,6 +633,8 @@ public:
     bool is_vtol_mode() const override { return true; }
     virtual bool is_vtol_man_mode() const override { return true; }
 
+    void run() override;
+
     // methods that affect movement of the vehicle in this mode
     void update() override;
 
@@ -491,7 +643,9 @@ protected:
     bool _enter() override;
     void _exit() override;
 };
+#endif  // QAUTOTUNE_ENABLED
 
+#endif  // HAL_QUADPLANE_ENABLED
 
 class ModeTakeoff: public Mode
 {
@@ -507,9 +661,15 @@ public:
 
     void navigate() override;
 
+    bool allows_throttle_nudging() const override { return true; }
+
+    bool does_auto_navigation() const override { return true; }
+
+    bool does_auto_throttle() const override { return true; }
+
     // var_info for holding parameter information
     static const struct AP_Param::GroupInfo var_info[];
-    
+
 protected:
     AP_Int16 target_alt;
     AP_Int16 target_dist;
@@ -521,3 +681,39 @@ protected:
 
     bool _enter() override;
 };
+
+#if HAL_SOARING_ENABLED
+
+class ModeThermal: public Mode
+{
+public:
+
+    Number mode_number() const override { return Number::THERMAL; }
+    const char *name() const override { return "THERMAL"; }
+    const char *name4() const override { return "THML"; }
+
+    // methods that affect movement of the vehicle in this mode
+    void update() override;
+
+    // Update thermal tracking and exiting logic.
+    void update_soaring();
+
+    void navigate() override;
+
+    bool allows_throttle_nudging() const override { return true; }
+
+    bool does_auto_navigation() const override { return true; }
+
+    // true if we are in an auto-throttle mode, which means
+    // we need to run the speed/height controller
+    bool does_auto_throttle() const override { return true; }
+
+protected:
+
+    bool exit_heading_aligned() const;
+    void restore_mode(const char *reason, ModeReason modereason);
+
+    bool _enter() override;
+};
+
+#endif

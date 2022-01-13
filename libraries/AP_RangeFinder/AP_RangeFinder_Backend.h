@@ -30,6 +30,7 @@ public:
 
     // update the state structure
     virtual void update() = 0;
+    virtual void init_serial(uint8_t serial_instance) {};
 
     virtual void handle_msg(const mavlink_message_t &msg) { return; }
 #if HAL_MSP_RANGEFINDER_ENABLED
@@ -37,10 +38,11 @@ public:
 #endif
 
     enum Rotation orientation() const { return (Rotation)params.orientation.get(); }
-    uint16_t distance_cm() const { return state.distance_cm; }
+    float distance() const { return state.distance_m; }
+    uint16_t distance_cm() const { return state.distance_m*100.0f; }
     uint16_t voltage_mv() const { return state.voltage_mv; }
-    int16_t max_distance_cm() const { return params.max_distance_cm; }
-    int16_t min_distance_cm() const { return params.min_distance_cm; }
+    virtual int16_t max_distance_cm() const { return params.max_distance_cm; }
+    virtual int16_t min_distance_cm() const { return params.min_distance_cm; }
     int16_t ground_clearance_cm() const { return params.ground_clearance_cm; }
     MAV_DISTANCE_SENSOR get_mav_distance_sensor_type() const;
     RangeFinder::Status status() const;
@@ -58,6 +60,13 @@ public:
 
     // return system time of last successful read from the sensor
     uint32_t last_reading_ms() const { return state.last_reading_ms; }
+
+    // get temperature reading in C.  returns true on success and populates temp argument
+    virtual bool get_temp(float &temp) const { return false; }
+
+    // 0 is no return value, 100 is perfect.  false means signal
+    // quality is not available
+    virtual bool get_signal_quality_pct(uint8_t &quality_pct) const { return false; }
 
 protected:
 

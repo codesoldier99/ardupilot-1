@@ -20,7 +20,7 @@
 #include <AP_Common/AP_Common.h>
 
 #include "AP_CANManager.h"
-#if HAL_MAX_CAN_PROTOCOL_DRIVERS > 1 && !HAL_MINIMIZE_FEATURES && HAL_MAX_CAN_PROTOCOL_DRIVERS
+#if HAL_MAX_CAN_PROTOCOL_DRIVERS > 1 && !HAL_MINIMIZE_FEATURES && HAL_CANMANAGER_ENABLED
 #include "AP_CANTester.h"
 #include <AP_SerialManager/AP_SerialManager.h>
 #include <stdio.h>
@@ -53,7 +53,7 @@ const AP_Param::GroupInfo CANTester::var_info[] = {
 
 };
 
-#define debug_can(level_debug, fmt, args...) do { AP::can().log_text(level_debug, "CANTester",  fmt, #args); } while (0)
+#define debug_can(level_debug, fmt, args...) do { AP::can().log_text(level_debug, "CANTester",  fmt, ##args); } while (0)
 
 bool CANTester::add_interface(AP_HAL::CANIface* can_iface)
 {
@@ -378,7 +378,7 @@ bool CANTester::test_busoff_recovery()
     uint64_t timestamp;
     AP_HAL::CANIface::CanIOFlags flags;
     AP_HAL::CANFrame bo_frame;
-    bo_frame.id = (12 | AP_HAL::CANFrame::FlagEFF);
+    bo_frame.id = (10 | AP_HAL::CANFrame::FlagEFF);
     memset(bo_frame.data, 0xA, sizeof(bo_frame.data));
     bo_frame.dlc = AP_HAL::CANFrame::MaxDataLen;
     bool bus_off_detected = false;
@@ -401,12 +401,12 @@ bool CANTester::test_busoff_recovery()
         return false;
     }
     gcs().send_text(MAV_SEVERITY_ERROR, "BusOff detected remove Fault.");
-    hal.scheduler->delay(1000);
+    hal.scheduler->delay(4000);
     gcs().send_text(MAV_SEVERITY_ERROR, "Running Loopback test.");
     //Send Dummy Frames to clear the error
-    _can_ifaces[0]->send(bo_frame, AP_HAL::native_micros64(), 0);
-    bo_frame.id += 1;
-    _can_ifaces[1]->send(bo_frame, AP_HAL::native_micros64(), 0);
+    while (!write_frame(0, bo_frame,100)) {}
+    bo_frame.id -= 1;
+    while (!write_frame(1, bo_frame,100)) {}
     //Clear the CAN bus Rx Buffer
     hal.scheduler->delay(1000);
     _can_ifaces[0]->clear_rx();
@@ -864,7 +864,7 @@ bool CANTester::test_uavcan_esc()
                 status_msg.error_count = 0;
                 status_msg.voltage = 30 + 2*((float)get_random16()/INT16_MAX);
                 status_msg.current = 10 + 10*((float)get_random16()/INT16_MAX);
-                status_msg.temperature = 124 + i + C_TO_KELVIN;
+                status_msg.temperature = C_TO_KELVIN(124 + i);
                 status_msg.rpm = 1200 + 300*((float)get_random16()/INT16_MAX);
                 status_msg.power_rating_pct = 70 + 20*((float)get_random16()/INT16_MAX);
                 esc_status_publisher->broadcast(status_msg);
@@ -874,9 +874,8 @@ bool CANTester::test_uavcan_esc()
 
 exit:
     // Clean up!
-    if (node != nullptr) {
-        delete node;
-    }
+    delete node;
+
     if (esc_command_listener != nullptr) {
         delete esc_command_listener;
         esc_command_listener = nullptr;

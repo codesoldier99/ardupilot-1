@@ -7,7 +7,7 @@
 #define FALSE 0
 
 #define DEBUG 0
-#define SERVO_MAX 4500  // This value represents 45 degrees and is just an
+#define SERVO_MAX 4500.0  // This value represents 45 degrees and is just an
                         // arbitrary representation of servo max travel.
 
 // failsafe
@@ -36,6 +36,7 @@ enum failsafe_action_short {
     FS_ACTION_SHORT_CIRCLE = 1,
     FS_ACTION_SHORT_FBWA = 2,
     FS_ACTION_SHORT_DISABLED = 3,
+    FS_ACTION_SHORT_FBWB = 4,
 };
 
 enum failsafe_action_long {
@@ -46,11 +47,11 @@ enum failsafe_action_long {
 };
 
 // type of stick mixing enabled
-enum StickMixing {
-    STICK_MIXING_DISABLED = 0,
-    STICK_MIXING_FBW      = 1,
-    STICK_MIXING_DIRECT   = 2,
-    STICK_MIXING_VTOL_YAW = 3,
+enum class StickMixing {
+    NONE     = 0,
+    FBW      = 1,
+    DIRECT   = 2,
+    VTOL_YAW = 3,
 };
 
 enum ChannelMixing {
@@ -78,7 +79,7 @@ enum tuning_pid_bits {
 
 static_assert(TUNING_BITS_END <= (1 << 24) + 1, "Tuning bit mask is too large to be set by MAVLink");
 
-// Logging message types
+// Logging message types - only 32 messages are available to the vehicle here.
 enum log_messages {
     LOG_CTUN_MSG,
     LOG_NTUN_MSG,
@@ -116,6 +117,8 @@ enum log_messages {
 #define MASK_LOG_SONAR                  (1<<14)
 // #define MASK_LOG_ARM_DISARM             (1<<15)
 #define MASK_LOG_IMU_RAW                (1UL<<19)
+#define MASK_LOG_ATTITUDE_FULLRATE      (1U<<20)
+#define MASK_LOG_VIDEO_STABILISATION    (1UL<<21)
 
 // altitude control algorithms
 enum {
@@ -144,6 +147,11 @@ enum {
     USE_REVERSE_THRUST_CRUISE                   = (1<<8),
     USE_REVERSE_THRUST_FBWB                     = (1<<9),
     USE_REVERSE_THRUST_GUIDED                   = (1<<10),
+    USE_REVERSE_THRUST_AUTO_LANDING_PATTERN     = (1<<11),
+    USE_REVERSE_THRUST_FBWA                   = (1<<12),
+    USE_REVERSE_THRUST_ACRO                   = (1<<13),
+    USE_REVERSE_THRUST_STABILIZE            = (1<<14),
+    USE_REVERSE_THRUST_THERMAL             = (1<<15),
 };
 
 enum FlightOptions {
@@ -151,6 +159,14 @@ enum FlightOptions {
     CRUISE_TRIM_THROTTLE = (1 << 1),
     DISABLE_TOFF_ATTITUDE_CHK = (1 << 2),
     CRUISE_TRIM_AIRSPEED = (1 << 3),
+    CLIMB_BEFORE_TURN = (1 << 4),
+    ACRO_YAW_DAMPER = (1 << 5),
+    SURPRESS_TKOFF_SCALING = (1<<6),
+    ENABLE_DEFAULT_AIRSPEED = (1<<7),
+    GCS_REMOVE_TRIM_PITCH_CD = (1 << 8),
+    OSD_REMOVE_TRIM_PITCH_CD = (1 << 9),
+    CENTER_THROTTLE_TRIM = (1<<10),
+    DISABLE_GROUND_PID_SUPPRESSION = (1<<11),
 };
 
 enum CrowFlapOptions {
@@ -170,4 +186,12 @@ enum guided_heading_type_t {
 enum class AirMode {
     OFF,
     ON,
+    ASSISTED_FLIGHT_ONLY,
+};
+
+enum class FenceAutoEnable : uint8_t {
+    OFF=0,
+    Auto=1,
+    AutoDisableFloorOnly=2,
+    WhenArmed=3
 };

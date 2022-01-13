@@ -18,7 +18,7 @@
 
 #include "AP_UAVCAN_IfaceMgr.h"
 
-#if HAL_MAX_CAN_PROTOCOL_DRIVERS
+#if HAL_ENABLE_LIBUAVCAN_DRIVERS
 #include "AP_UAVCAN_Clock.h"
 #include <AP_HAL/AP_HAL.h>
 #include <AP_CANManager/AP_CANManager.h>
@@ -166,7 +166,7 @@ bool CanIfaceMgr::add_interface(AP_HAL::CANIface *can_iface)
         AP::can().log_text(AP_CANManager::LOG_ERROR, LOG_TAG, "UAVCANIfaceMgr: Setting event handle failed\n");
         return false;
     }
-    AP::can().log_text(AP_CANManager::LOG_INFO, LOG_TAG, "UAVCANIfaceMgr: Successfully added interface %d\n");
+    AP::can().log_text(AP_CANManager::LOG_INFO, LOG_TAG, "UAVCANIfaceMgr: Successfully added interface %d\n", int(num_ifaces));
     num_ifaces++;
     return true;
 }
@@ -256,4 +256,4 @@ int16_t CanIfaceMgr::select(CanSelectMasks& inout_masks,
     inout_masks = makeSelectMasks(in_masks, pending_tx);  // Return what we got even if none of the requested events are set
     return 1;                                   // Return value doesn't matter as long as it is non-negative
 }
-#endif
+#endif //HAL_ENABLE_LIBUAVCAN_DRIVERSs

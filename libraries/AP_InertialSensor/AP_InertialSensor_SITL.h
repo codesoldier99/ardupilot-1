@@ -28,8 +28,9 @@ private:
     float gyro_drift(void);
     void generate_accel();
     void generate_gyro();
+    float get_temperature(void);
 
-    SITL::SITL *sitl;
+    SITL::SIM *sitl;
 
     const uint16_t gyro_sample_hz;
     const uint16_t accel_sample_hz;
@@ -42,6 +43,7 @@ private:
     float accel_time;
     float gyro_motor_phase[12];
     float accel_motor_phase[12];
+    uint32_t temp_start_ms;
 
     static uint8_t bus_id;
 };

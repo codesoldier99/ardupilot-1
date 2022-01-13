@@ -13,6 +13,11 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#ifndef HAL_DEBUG_BUILD
+#define AP_INLINE_VECTOR_OPS
+#pragma GCC optimize("O2")
+#endif
+
 #include "NotchFilter.h"
 
 /*
@@ -146,4 +151,5 @@ NotchFilterParams::NotchFilterParams(void)
    instantiate template classes
  */
 template class NotchFilter<float>;
+template class NotchFilter<Vector2f>;
 template class NotchFilter<Vector3f>;

@@ -6,6 +6,7 @@
 #include "AC_Sprayer/AC_Sprayer.h"
 #include "AP_Gripper/AP_Gripper.h"
 #include "AP_Rally.h"
+#include "AP_Torqeedo/AP_Torqeedo.h"
 
 // Global parameter class.
 //
@@ -81,6 +82,9 @@ public:
         k_param_cli_enabled_old,    // unused
         k_param_gcs3,
         k_param_gcs_pid_mask,
+        k_param_gcs4,
+        k_param_gcs5,
+        k_param_gcs6,
 
         //
         // 130: Sensor parameters
@@ -114,7 +118,7 @@ public:
         k_param_auto_trigger_pin,
         k_param_auto_kickstart,
         k_param_turn_circle,  // unused
-        k_param_turn_max_g,
+        k_param_turn_max_g_old, // unused
 
         //
         // 160: Radio settings
@@ -236,7 +240,6 @@ public:
     AP_Int8     ch7_option;
     AP_Int8     auto_trigger_pin;
     AP_Float    auto_kickstart;
-    AP_Float    turn_max_g;
     AP_Int16    gcs_pid_mask;
 
     // Throttle
@@ -326,8 +329,10 @@ public:
     // fence library
     AC_Fence fence;
 
+#if HAL_PROXIMITY_ENABLED
     // proximity library
     AP_Proximity proximity;
+#endif
 
     // avoidance library
     AC_Avoid avoid;
@@ -378,9 +383,9 @@ public:
     // stick mixing for auto modes
     AP_Int8     stick_mixing;
 
-#ifdef ENABLE_SCRIPTING
+#if AP_SCRIPTING_ENABLED
     AP_Scripting scripting;
-#endif // ENABLE_SCRIPTING
+#endif // AP_SCRIPTING_ENABLED
 
     // waypoint navigation
     AR_WPNav wp_nav;
@@ -399,6 +404,16 @@ public:
 
     // FS options
     AP_Int32 fs_options;
+
+#if HAL_TORQEEDO_ENABLED
+    // torqeedo motor driver
+    AP_Torqeedo torqeedo;
+#endif
+
+#if HAL_AIS_ENABLED
+    // Automatic Identification System - for tracking sea-going vehicles
+    AP_AIS ais;
+#endif
 };
 
 extern const AP_Param::Info var_info[];

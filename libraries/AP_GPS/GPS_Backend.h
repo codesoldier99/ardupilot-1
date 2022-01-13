@@ -22,6 +22,16 @@
 #include <AP_RTC/JitterCorrection.h>
 #include "AP_GPS.h"
 
+#ifndef AP_GPS_DEBUG_LOGGING_ENABLED
+// enable this to log all bytes from the GPS. Also needs a call to
+// log_data() in each backend
+#define AP_GPS_DEBUG_LOGGING_ENABLED 0
+#endif
+
+#if AP_GPS_DEBUG_LOGGING_ENABLED
+#include <AP_HAL/utility/RingBuffer.h>
+#endif
+
 class AP_GPS_Backend
 {
 public:
@@ -40,7 +50,7 @@ public:
     // Allows external system to identify type of receiver connected.
     virtual AP_GPS::GPS_Status highest_supported_status(void) { return AP_GPS::GPS_OK_FIX_3D; }
 
-    virtual bool is_configured(void) { return true; }
+    virtual bool is_configured(void) const { return true; }
 
     virtual void inject_data(const uint8_t *data, uint16_t len);
 
@@ -54,7 +64,10 @@ public:
 #if HAL_MSP_GPS_ENABLED
     virtual void handle_msp(const MSP::msp_gps_data_message_t &pkt) { return; }
 #endif
-
+#if HAL_EXTERNAL_AHRS_ENABLED
+    virtual void handle_external(const AP_ExternalAHRS::gps_data_message_t &pkt) { return; }
+#endif
+    
     // driver specific lag, returns true if the driver is confident in the provided lag
     virtual bool get_lag(float &lag) const { lag = 0.2f; return true; }
 
@@ -74,10 +87,19 @@ public:
     virtual bool get_RTCMV3(const uint8_t *&bytes, uint16_t &len) { return false; }
     virtual void clear_RTCMV3(void) {};
 
+    virtual bool get_error_codes(uint32_t &error_codes) const { return false; }
+
     // return iTOW of last message, or zero if not supported
     uint32_t get_last_itow(void) const {
         return _last_itow;
     }
+
+    enum DriverOptions : int16_t {
+        UBX_MBUseUart2    = (1U << 0U),
+        SBF_UseBaseForYaw = (1U << 1U),
+        UBX_Use115200     = (1U << 2U),
+        UAVCAN_MBUseDedicatedBus  = (1 << 3U),
+    };
 
 protected:
     AP_HAL::UARTDriver *port;           ///< UART we are attached to
@@ -114,9 +136,24 @@ protected:
     /*
       access to driver option bits
      */
-    uint16_t driver_options(void) const {
-        return uint16_t(gps._driver_options.get());
+    DriverOptions driver_options(void) const {
+        return DriverOptions(gps._driver_options.get());
     }
+
+#if GPS_MOVING_BASELINE
+    bool calculate_moving_base_yaw(const float reported_heading_deg, const float reported_distance, const float reported_D);
+    bool calculate_moving_base_yaw(AP_GPS::GPS_State &interim_state, const float reported_heading_deg, const float reported_distance, const float reported_D);
+#endif //GPS_MOVING_BASELINE
+
+    // get GPS type, for subtype config
+    AP_GPS::GPS_Type get_type() const {
+        return gps.get_type(state.instance);
+    }
+
+#if AP_GPS_DEBUG_LOGGING_ENABLED
+    // log some data for debugging
+    void log_data(const uint8_t *data, uint16_t length);
+#endif
 
 private:
     // itow from previous message
@@ -128,4 +165,13 @@ private:
     uint16_t _rate_counter;
 
     JitterCorrection jitter_correction;
+
+#if AP_GPS_DEBUG_LOGGING_ENABLED
+    struct {
+        int fd = -1;
+        ByteBuffer buf{32768};
+        bool io_registered;
+    } logging;
+    void logging_update(void);
+#endif
 };

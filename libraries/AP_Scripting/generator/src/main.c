@@ -19,14 +19,20 @@ char keyword_operator[]            = "operator";
 char keyword_read[]                = "read";
 char keyword_scheduler_semaphore[] = "scheduler-semaphore";
 char keyword_semaphore[]           = "semaphore";
+char keyword_semaphore_pointer[]   = "semaphore-pointer";
 char keyword_singleton[]           = "singleton";
 char keyword_userdata[]            = "userdata";
 char keyword_write[]               = "write";
+char keyword_literal[]             = "literal";
+char keyword_reference[]           = "reference";
 
 // attributes (should include the leading ' )
 char keyword_attr_enum[]    = "'enum";
 char keyword_attr_literal[] = "'literal";
 char keyword_attr_null[]    = "'Null";
+char keyword_attr_reference[]  = "'Ref";
+char keyword_attr_array[]      = "'array";
+char keyword_attr_no_range_check[] = "'skip_check";
 
 // type keywords
 char keyword_boolean[]  = "boolean";
@@ -55,6 +61,7 @@ struct header {
   struct header *next;
   char *name; // name of the header to include (not sanatized)
   int line; // line of the file declared on
+  char *dependency;
 };
 
 struct generator_state {
@@ -67,6 +74,7 @@ struct generator_state {
 FILE *description;
 FILE *header;
 FILE *source;
+FILE *docs;
 
 static struct generator_state state;
 static struct header * headers;
@@ -139,6 +147,8 @@ struct range_check {
 enum type_flags {
   TYPE_FLAGS_NULLABLE = (1U << 1),
   TYPE_FLAGS_ENUM     = (1U << 2),
+  TYPE_FLAGS_REFERNCE = (1U << 3),
+  TYPE_FLAGS_NO_RANGE_CHECK = (1U << 4),
 };
 
 struct type {
@@ -253,6 +263,12 @@ void *allocate(const size_t size) {
   return data;
 }
 
+// lazy helper that allocates a storage buffer and does strcpy for us
+void string_copy(char **dest, const char * src) {
+  *dest = (char *)allocate(strlen(src) + 1);
+  strcpy(*dest, src);
+}
+
 void handle_header(void) {
   trace(TRACE_HEADER, "Parsing a header");
 
@@ -277,6 +293,22 @@ void handle_header(void) {
   node->line = state.line_num;
   node->name = (char *)allocate(strlen(name) + 1);
   strcpy(node->name, name);
+
+  // add depedns
+  char * key_word = next_token();
+  char *depends = NULL;
+  if (key_word != NULL) {
+    if (strcmp(key_word, keyword_depends) == 0) {
+        depends = strtok(NULL, "");
+        if (depends == NULL) {
+          error(ERROR_HEADER, "Expected a depends string for %s", name);
+        }
+        string_copy(&(node->dependency), depends);
+    } else {
+      error(ERROR_HEADER, "Received an unsupported keyword on a header: %s", key_word);
+    }
+  }
+
   headers = node;
 
   trace(TRACE_HEADER, "Added header %s", name);
@@ -303,6 +335,8 @@ struct argument {
 struct method {
   struct method * next;
   char *name;
+  char *sanatized_name;  // sanatized name of the C++ singleton
+  char *alias; // (optional) used for scripting access
   int line; // line declared on
   struct type return_type;
   struct argument * arguments;
@@ -312,14 +346,19 @@ struct method {
 struct userdata_field {
   struct userdata_field * next;
   char * name;
+  char * alias;
   struct type type; // field type, points to a string
   int line; // line declared on
   unsigned int access_flags;
+  char * array_len; // literal array length
 };
 
 enum userdata_flags {
   UD_FLAG_SEMAPHORE         = (1U << 0),
   UD_FLAG_SCHEDULER_SEMAPHORE = (1U << 1),
+  UD_FLAG_LITERAL = (1U << 2),
+  UD_FLAG_SEMAPHORE_POINTER = (1U << 3),
+  UD_FLAG_REFERENCE = (1U << 4),
 };
 
 struct userdata_enum {
@@ -338,35 +377,32 @@ struct userdata {
   enum userdata_type ud_type;
   uint32_t operations; // bitset of enum operation_types
   int flags; // flags from the userdata_flags enum
+  char *dependency;
 };
 
 static struct userdata *parsed_userdata;
 static struct userdata *parsed_ap_objects;
 
-
-struct dependency {
-  struct dependency * next;
-  char *symbol;    // dependency symbol to check
-  char *value;     // value to target
-  char *error_msg; // message if the check fails
-};
-
-static struct dependency *parsed_dependencies;
-
-// lazy helper that allocates a storage buffer and does strcpy for us
-void string_copy(char **dest, const char * src) {
-  *dest = (char *)allocate(strlen(src) + 1);
-  strcpy(*dest, src);
+void sanitize_character(char **str, char character) {
+  char *position = strchr(*str, character);
+  while (position) {
+    *position = '_';
+    position = strchr(position, character);
+  }
 }
 
 void sanatize_name(char **dest, char *src) {
   *dest = (char *)allocate(strlen(src) + 1);
   strcpy(*dest, src);
-  char *position = strchr(*dest, ':');
-  while (position) {
-    *position = '_';
-    position = strchr(position, ':');
-  }
+
+  sanitize_character(dest, ':');
+  sanitize_character(dest, '.');
+  sanitize_character(dest, '<');
+  sanitize_character(dest, '>');
+  sanitize_character(dest, '(');
+  sanitize_character(dest, ')');
+  sanitize_character(dest, '-');
+
 };
 
 
@@ -406,26 +442,28 @@ unsigned int parse_access_flags(struct type * type) {
       flags |= ACCESS_FLAG_READ;
     } else if (strcmp(state.token, keyword_write) == 0) {
       flags |= ACCESS_FLAG_WRITE;
-      switch (type->type) {
-        case TYPE_FLOAT:
-        case TYPE_INT8_T:
-        case TYPE_INT16_T:
-        case TYPE_INT32_T:
-        case TYPE_UINT8_T:
-        case TYPE_UINT16_T:
-        case TYPE_UINT32_T:
-        case TYPE_ENUM:
-          type->range = parse_range_check(type->type);
-          break;
-        case TYPE_AP_OBJECT:
-        case TYPE_USERDATA:
-        case TYPE_BOOLEAN:
-        case TYPE_STRING:
-        case TYPE_LITERAL:
-          // a range check is illogical
-          break;
-        case TYPE_NONE:
-          error(ERROR_INTERNAL, "Can't access a NONE type");
+      if ((type->flags & TYPE_FLAGS_NO_RANGE_CHECK) == 0) {
+        switch (type->type) {
+          case TYPE_FLOAT:
+          case TYPE_INT8_T:
+          case TYPE_INT16_T:
+          case TYPE_INT32_T:
+          case TYPE_UINT8_T:
+          case TYPE_UINT16_T:
+          case TYPE_UINT32_T:
+          case TYPE_ENUM:
+            type->range = parse_range_check(type->type);
+            break;
+          case TYPE_AP_OBJECT:
+          case TYPE_USERDATA:
+          case TYPE_BOOLEAN:
+          case TYPE_STRING:
+          case TYPE_LITERAL:
+            // a range check is illogical
+            break;
+          case TYPE_NONE:
+            error(ERROR_INTERNAL, "Can't access a NONE type");
+        }
       }
     } else {
       break;
@@ -485,10 +523,18 @@ int parse_type(struct type *type, const uint32_t restrictions, enum range_check_
         error(ERROR_USERDATA, "%s is not nullable in this context", data_type);
       }
       type->flags |= TYPE_FLAGS_NULLABLE;
+    } else if (strcmp(attribute, keyword_attr_reference) == 0) {
+      type->flags |= TYPE_FLAGS_REFERNCE;
+    } else if (strcmp(attribute, keyword_attr_no_range_check) == 0) {
+      type->flags |= TYPE_FLAGS_NO_RANGE_CHECK;
     } else {
       error(ERROR_USERDATA, "Unknown attribute: %s", attribute);
     }
     attribute[0] = 0;
+  }
+
+  if ((type->access == ACCESS_REFERENCE) && ((type->flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE)) == 0)) {
+      error(ERROR_USERDATA, "Only support refences access will 'Null or 'Ref keyword");
   }
 
   if (strcmp(data_type, keyword_boolean) == 0) {
@@ -515,7 +561,9 @@ int parse_type(struct type *type, const uint32_t restrictions, enum range_check_
     type->type = TYPE_ENUM;
     string_copy(&(type->data.enum_name), data_type);
   } else if (type->type == TYPE_LITERAL) {
-      string_copy(&(type->data.literal), data_type);
+    string_copy(&(type->data.literal), data_type);
+  } else if (strcmp(data_type, keyword_alias) == 0) {
+    error(ERROR_USERDATA, "Cant add alias to unknown function");
   } else {
     // this must be a user data or an ap_object, check if it's already been declared as an object
     struct userdata *node = parsed_ap_objects;
@@ -533,7 +581,7 @@ int parse_type(struct type *type, const uint32_t restrictions, enum range_check_
   }
 
   // sanity check that only supported types are nullable
-  if (type->flags & TYPE_FLAGS_NULLABLE) {
+  if (type->flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE)) {
     // a switch is a very verbose way to do this, but forces users to consider new types added
     switch (type->type) {
       case TYPE_FLOAT:
@@ -551,13 +599,17 @@ int parse_type(struct type *type, const uint32_t restrictions, enum range_check_
       case TYPE_AP_OBJECT:
       case TYPE_LITERAL:
       case TYPE_NONE:
-        error(ERROR_USERDATA, "%s types cannot be nullable", data_type);
+        if (type->flags & TYPE_FLAGS_NULLABLE) {
+          error(ERROR_USERDATA, "%s types cannot be nullable", data_type);
+        } else {
+          error(ERROR_USERDATA, "%s types cannot be passed as reference", data_type);
+        }
         break;
     }
   }
 
   // add range checks, unless disabled or a nullable type
-  if (range_type != RANGE_CHECK_NONE && !(type->flags & TYPE_FLAGS_NULLABLE)) {
+  if (range_type != RANGE_CHECK_NONE && !(type->flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE | TYPE_FLAGS_NO_RANGE_CHECK))) {
     switch (type->type) {
       case TYPE_FLOAT:
       case TYPE_INT8_T:
@@ -599,17 +651,32 @@ void handle_userdata_field(struct userdata *data) {
   trace(TRACE_USERDATA, "Adding a userdata field");
 
   // find the field name
-  char * field_name = next_token();
-  if (field_name == NULL) {
+  char * token = next_token();
+  if (token == NULL) {
     error(ERROR_USERDATA, "Missing a field name for userdata %s", data->name);
   }
-  
+
+  size_t split = strcspn(token, "\'");
+  char * field_name;
+  if (split == strlen(token)) {
+    string_copy(&field_name, token);
+  } else {
+    field_name = (char *)allocate(split+1);
+    memcpy(field_name, token, split);
+  }
+
   struct userdata_field * field = data->fields;
   while (field != NULL && strcmp(field->name, field_name)) {
     field = field-> next;
   }
   if (field != NULL) {
-    error(ERROR_USERDATA, "Field %s already exsists in userdata %s (declared on %d)", field_name, data->name, field->line);
+    char *token = next_token();
+    if (strcmp(token, keyword_alias) != 0) {
+      error(ERROR_USERDATA, "Field %s already exists in userdata %s (declared on %d)", field_name, data->name, field->line);
+    }
+    char *alias = next_token();
+    string_copy(&(field->alias), alias);
+    return;
   }
 
   trace(TRACE_USERDATA, "Adding field %s", field_name);
@@ -618,6 +685,16 @@ void handle_userdata_field(struct userdata *data) {
   data->fields = field;
   field->line = state.line_num;
   string_copy(&(field->name), field_name);
+
+  char *attribute = strchr(token, '\'');
+  if (attribute != NULL) {
+    if (strcmp(attribute, keyword_attr_array) != 0) {
+      error(ERROR_USERDATA, "Unknown feild attribute %s for userdata %s feild %s", attribute, data->name, field_name);
+    }
+    char * token = next_token();
+    string_copy(&(field->array_len), token);
+    trace(TRACE_USERDATA, "userdata %s feild %s array length %s", data->name, field->name, field->array_len);
+  }
 
   parse_type(&(field->type), TYPE_RESTRICTION_NOT_NULLABLE, RANGE_CHECK_NONE);
   field->access_flags = parse_access_flags(&(field->type));
@@ -637,7 +714,13 @@ void handle_method(char *parent_name, struct method **methods) {
     method = method-> next;
   }
   if (method != NULL) {
-    error(ERROR_USERDATA, "Method %s already exsists for %s (declared on %d)", name, parent_name, method->line);
+    char *token = next_token();
+    if (strcmp(token, keyword_alias) != 0) {
+      error(ERROR_USERDATA, "Method %s already exists for %s (declared on %d)", name, parent_name, method->line);
+    }
+    char *alias = next_token();
+    string_copy(&(method->alias), alias);
+    return;
   }
 
   trace(TRACE_USERDATA, "Adding method %s", name);
@@ -645,6 +728,7 @@ void handle_method(char *parent_name, struct method **methods) {
   method->next = *methods;
   *methods = method;
   string_copy(&(method->name), name);
+  sanatize_name(&(method->sanatized_name), name);
   method->line = state.line_num;
 
   parse_type(&(method->return_type), TYPE_RESTRICTION_NONE, RANGE_CHECK_NONE);
@@ -658,8 +742,14 @@ void handle_method(char *parent_name, struct method **methods) {
     if ((method->return_type.type != TYPE_BOOLEAN) && (arg_type.flags & TYPE_FLAGS_NULLABLE)) {
       error(ERROR_USERDATA, "Nullable arguments are only available on a boolean method");
     }
+    if ((method->return_type.type == TYPE_BOOLEAN) && (arg_type.flags & TYPE_FLAGS_REFERNCE)) {
+      error(ERROR_USERDATA, "Use Nullable arguments on a boolean method, not 'Ref");
+    }
     if (arg_type.flags & TYPE_FLAGS_NULLABLE) {
       method->flags |= TYPE_FLAGS_NULLABLE;
+    }
+    if (arg_type.flags & TYPE_FLAGS_REFERNCE) {
+      method->flags |= TYPE_FLAGS_REFERNCE;
     }
     struct argument * arg = allocate(sizeof(struct argument));
     memcpy(&(arg->type), &arg_type, sizeof(struct type));
@@ -758,6 +848,24 @@ void handle_userdata(void) {
     handle_method(node->name, &(node->methods));
   } else if (strcmp(type, keyword_enum) == 0) {
     handle_userdata_enum(node);
+  } else if (strcmp(type, keyword_alias) == 0) {
+    const char *alias = next_token();
+    if (alias == NULL) {
+      error(ERROR_SINGLETON, "Missing the name of the alias for userdata %s", node->name);
+    }
+    node->alias = (char *)allocate(strlen(alias) + 1);
+    strcpy(node->alias, alias);
+
+  } else if (strcmp(type, keyword_depends) == 0) {
+      if (node->dependency != NULL) {
+        error(ERROR_SINGLETON, "Userdata only support a single depends");
+      }
+      char *depends = strtok(NULL, "");
+      if (depends == NULL) {
+        error(ERROR_DEPENDS, "Expected a depends string for %s",node->name);
+      }
+      string_copy(&(node->dependency), depends);
+
   } else {
     error(ERROR_USERDATA, "Unknown or unsupported type for userdata: %s", type);
   }
@@ -811,12 +919,29 @@ void handle_singleton(void) {
     node->flags |= UD_FLAG_SEMAPHORE;
   } else if (strcmp(type, keyword_scheduler_semaphore) == 0) {
     node->flags |= UD_FLAG_SCHEDULER_SEMAPHORE;
+  } else if (strcmp(type, keyword_semaphore_pointer) == 0) {
+    node->flags |= UD_FLAG_SCHEDULER_SEMAPHORE;
   } else if (strcmp(type, keyword_method) == 0) {
     handle_method(node->name, &(node->methods));
   } else if (strcmp(type, keyword_enum) == 0) {
     handle_userdata_enum(node);
+  } else if (strcmp(type, keyword_depends) == 0) {
+    if (node->dependency != NULL) {
+      error(ERROR_SINGLETON, "Singletons only support a single depends");
+    }
+    char *depends = strtok(NULL, "");
+    if (depends == NULL) {
+      error(ERROR_DEPENDS, "Expected a depends string for %s",node->name);
+    }
+    string_copy(&(node->dependency), depends);
+  } else if (strcmp(type, keyword_literal) == 0) {
+    node->flags |= UD_FLAG_LITERAL;
+  } else if (strcmp(type, keyword_field) == 0) {
+    handle_userdata_field(node);
+  } else if (strcmp(type, keyword_reference) == 0) {
+    node->flags |= UD_FLAG_REFERENCE;
   } else {
-    error(ERROR_SINGLETON, "Singletons only support aliases, methods or semaphore keyowrds (got %s)", type);
+    error(ERROR_SINGLETON, "Singletons only support aliases, methods, semaphore, depends or literal keywords (got %s)", type);
   }
 
   // ensure no more tokens on the line
@@ -870,15 +995,30 @@ void handle_ap_object(void) {
     node->flags |= UD_FLAG_SEMAPHORE;
   } else if (strcmp(type, keyword_scheduler_semaphore) == 0) {
     node->flags |= UD_FLAG_SCHEDULER_SEMAPHORE;
+  } else if (strcmp(type, keyword_semaphore_pointer) == 0) {
+    node->flags |= UD_FLAG_SEMAPHORE_POINTER;
   } else if (strcmp(type, keyword_method) == 0) {
     handle_method(node->name, &(node->methods));
+  } else if (strcmp(type, keyword_depends) == 0) {
+      if (node->dependency != NULL) {
+        error(ERROR_SINGLETON, "AP_Objects only support a single depends");
+      }
+      char *depends = strtok(NULL, "");
+      if (depends == NULL) {
+        error(ERROR_DEPENDS, "Expected a depends string for %s",node->name);
+      }
+      string_copy(&(node->dependency), depends);
+
   } else {
     error(ERROR_SINGLETON, "AP_Objects only support aliases, methods or semaphore keyowrds (got %s)", type);
   }
 
   // check that we didn't just add 2 singleton flags
-  if ((node->flags & UD_FLAG_SEMAPHORE) && (node->flags & UD_FLAG_SCHEDULER_SEMAPHORE)) {
-    error(ERROR_SINGLETON, "Taking both a library semaphore and scheduler semaphore is prohibited");
+  int semaphore = (node->flags & UD_FLAG_SEMAPHORE)?1:0;
+  semaphore += (node->flags & UD_FLAG_SCHEDULER_SEMAPHORE)?1:0;
+  semaphore += (node->flags & UD_FLAG_SEMAPHORE_POINTER)?1:0;
+  if (semaphore > 1) {
+    error(ERROR_SINGLETON, "Taking multiple types of semaphore is prohibited");
   }
 
   // ensure no more tokens on the line
@@ -887,36 +1027,6 @@ void handle_ap_object(void) {
   }
 }
 
-void handle_depends(void) {
-  trace(TRACE_DEPENDS, "Adding a dependency");
-
-  char *symbol = next_token();
-  if (symbol == NULL) {
-    error(ERROR_DEPENDS, "Expected a name symbol for the dependency");
-  }
-
-  // read value
-  char *value = next_token();
-  if (value == NULL) {
-    error(ERROR_DEPENDS, "Expected a required value for dependency on %s", symbol);
-  }
-
-  char *error_msg = strtok(NULL, "");
-  if (error_msg == NULL) {
-    error(ERROR_DEPENDS, "Expected a error message for dependency on %s", symbol);
-  }
-
-  trace(TRACE_SINGLETON, "Allocating new dependency for %s", symbol);
-  struct dependency * node = (struct dependency *)allocate(sizeof(struct dependency));
-  node->symbol = (char *)allocate(strlen(symbol) + 1);
-  strcpy(node->symbol, symbol);
-  node->value = (char *)allocate(strlen(value) + 1);
-  strcpy(node->value, value);
-  node->error_msg = (char *)allocate(strlen(error_msg) + 1);
-  strcpy(node->error_msg, error_msg);
-  node->next = parsed_dependencies;
-  parsed_dependencies = node;
-}
 void sanity_check_userdata(void) {
   struct userdata * node = parsed_userdata;
   while(node) {
@@ -927,20 +1037,24 @@ void sanity_check_userdata(void) {
   }
 }
 
-void emit_headers(FILE *f) {
-  struct header *node = headers;
-  while (node) {
-    fprintf(f, "#include <%s>\n", node->name);
-    node = node->next;
+void start_dependency(FILE *f, const char *dependency) {
+  if (dependency != NULL) {
+    fprintf(f, "#if %s\n", dependency);
   }
 }
 
-void emit_dependencies(FILE *f) {
-  struct dependency *node = parsed_dependencies;
+void end_dependency(FILE *f, const char *dependency) {
+  if (dependency != NULL) {
+    fprintf(f, "#endif // %s\n", dependency);
+  }
+}
+
+void emit_headers(FILE *f) {
+  struct header *node = headers;
   while (node) {
-    fprintf(f, "#if !defined(%s) || (%s != %s)\n", node->symbol, node->symbol, node->value);
-    fprintf(f, "  #error %s\n", node->error_msg);
-    fprintf(f, "#endif // !defined(%s) || (%s != %s)\n", node->symbol, node->symbol, node->value);
+    start_dependency(f, node->dependency);
+    fprintf(f, "#include <%s>\n", node->name);
+    end_dependency(f, node->dependency);
     node = node->next;
   }
 }
@@ -948,15 +1062,18 @@ void emit_dependencies(FILE *f) {
 void emit_userdata_allocators(void) {
   struct userdata * node = parsed_userdata;
   while (node) {
+    start_dependency(source, node->dependency);
     fprintf(source, "int new_%s(lua_State *L) {\n", node->sanatized_name);
     fprintf(source, "    luaL_checkstack(L, 2, \"Out of stack\");\n"); // ensure we have sufficent stack to push the return
     fprintf(source, "    void *ud = lua_newuserdata(L, sizeof(%s));\n", node->name);
     fprintf(source, "    memset(ud, 0, sizeof(%s));\n", node->name);
     fprintf(source, "    new (ud) %s();\n", node->name);
-    fprintf(source, "    luaL_getmetatable(L, \"%s\");\n", node->name);
+    fprintf(source, "    luaL_getmetatable(L, \"%s\");\n", node->alias ? node->alias :  node->name);
     fprintf(source, "    lua_setmetatable(L, -2);\n");
     fprintf(source, "    return 1;\n");
-    fprintf(source, "}\n\n");
+    fprintf(source, "}\n");
+    end_dependency(source, node->dependency);
+    fprintf(source, "\n");
     node = node->next;
   }
 }
@@ -964,6 +1081,7 @@ void emit_userdata_allocators(void) {
 void emit_ap_object_allocators(void) {
   struct userdata * node = parsed_ap_objects;
   while (node) {
+    start_dependency(source, node->dependency);
     fprintf(source, "int new_%s(lua_State *L) {\n", node->sanatized_name);
     fprintf(source, "    luaL_checkstack(L, 2, \"Out of stack\");\n"); // ensure we have sufficent stack to push the return
     fprintf(source, "    void *ud = lua_newuserdata(L, sizeof(%s *));\n", node->name);
@@ -971,7 +1089,9 @@ void emit_ap_object_allocators(void) {
     fprintf(source, "    luaL_getmetatable(L, \"%s\");\n", node->name);
     fprintf(source, "    lua_setmetatable(L, -2);\n");
     fprintf(source, "    return 1;\n");
-    fprintf(source, "}\n\n");
+    fprintf(source, "}\n");
+    end_dependency(source, node->dependency);
+    fprintf(source, "\n");
     node = node->next;
   }
 }
@@ -979,10 +1099,13 @@ void emit_ap_object_allocators(void) {
 void emit_userdata_checkers(void) {
   struct userdata * node = parsed_userdata;
   while (node) {
+    start_dependency(source, node->dependency);
     fprintf(source, "%s * check_%s(lua_State *L, int arg) {\n", node->name, node->sanatized_name);
-    fprintf(source, "    void *data = luaL_checkudata(L, arg, \"%s\");\n", node->name);
+    fprintf(source, "    void *data = luaL_checkudata(L, arg, \"%s\");\n",  node->alias ? node->alias :  node->name);
     fprintf(source, "    return (%s *)data;\n", node->name);
-    fprintf(source, "}\n\n");
+    fprintf(source, "}\n");
+    end_dependency(source, node->dependency);
+    fprintf(source, "\n");
     node = node->next;
   }
 }
@@ -990,10 +1113,13 @@ void emit_userdata_checkers(void) {
 void emit_ap_object_checkers(void) {
   struct userdata * node = parsed_ap_objects;
   while (node) {
+    start_dependency(source, node->dependency);
     fprintf(source, "%s ** check_%s(lua_State *L, int arg) {\n", node->name, node->sanatized_name);
     fprintf(source, "    void *data = luaL_checkudata(L, arg, \"%s\");\n", node->name);
     fprintf(source, "    return (%s **)data;\n", node->name);
-    fprintf(source, "}\n\n");
+    fprintf(source, "}\n");
+    end_dependency(source, node->dependency);
+    fprintf(source, "\n");
     node = node->next;
   }
 }
@@ -1001,8 +1127,10 @@ void emit_ap_object_checkers(void) {
 void emit_userdata_declarations(void) {
   struct userdata * node = parsed_userdata;
   while (node) {
+    start_dependency(header, node->dependency);
     fprintf(header, "int new_%s(lua_State *L);\n", node->sanatized_name);
     fprintf(header, "%s * check_%s(lua_State *L, int arg);\n", node->name, node->sanatized_name);
+    end_dependency(header, node->dependency);
     node = node->next;
   }
 }
@@ -1010,8 +1138,10 @@ void emit_userdata_declarations(void) {
 void emit_ap_object_declarations(void) {
   struct userdata * node = parsed_ap_objects;
   while (node) {
+    start_dependency(header, node->dependency);
     fprintf(header, "int new_%s(lua_State *L);\n", node->sanatized_name);
     fprintf(header, "%s ** check_%s(lua_State *L, int arg);\n", node->name, node->sanatized_name);
+    end_dependency(header, node->dependency);
     node = node->next;
   }
 }
@@ -1024,32 +1154,32 @@ void emit_checker(const struct type t, int arg_number, int skipped, const char *
     error(ERROR_INTERNAL, "Can't handle more then %d arguments to a function", NULLABLE_ARG_COUNT_BASE);
   }
 
-  if (t.flags & TYPE_FLAGS_NULLABLE) {
+  if (t.flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE)) {
     arg_number = arg_number + NULLABLE_ARG_COUNT_BASE;
     switch (t.type) {
       case TYPE_BOOLEAN:
-        fprintf(source, "%sbool data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%sbool data_%d;\n", indentation, arg_number);
         break;
       case TYPE_FLOAT:
-        fprintf(source, "%sfloat data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%sfloat data_%d;\n", indentation, arg_number);
         break;
       case TYPE_INT8_T:
-        fprintf(source, "%sint8_t data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%sint8_t data_%d;\n", indentation, arg_number);
         break;
       case TYPE_INT16_T:
-        fprintf(source, "%sint16_t data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%sint16_t data_%d;\n", indentation, arg_number);
         break;
       case TYPE_INT32_T:
-        fprintf(source, "%sint32_t data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%sint32_t data_%d;\n", indentation, arg_number);
         break;
       case TYPE_UINT8_T:
-        fprintf(source, "%suint8_t data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%suint8_t data_%d;\n", indentation, arg_number);
         break;
       case TYPE_UINT16_T:
-        fprintf(source, "%suint16_t data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%suint16_t data_%d;\n", indentation, arg_number);
         break;
       case TYPE_UINT32_T:
-        fprintf(source, "%suint32_t data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%suint32_t data_%d;\n", indentation, arg_number);
         break;
       case TYPE_AP_OBJECT:
       case TYPE_NONE:
@@ -1059,7 +1189,7 @@ void emit_checker(const struct type t, int arg_number, int skipped, const char *
         fprintf(source, "%schar * data_%d = {};\n", indentation, arg_number);
         break;
       case TYPE_ENUM:
-        fprintf(source, "%suint32_t data_%d = {};\n", indentation, arg_number);
+        fprintf(source, "%suint32_t data_%d;\n", indentation, arg_number);
         break;
       case TYPE_USERDATA:
         fprintf(source, "%s%s data_%d = {};\n", indentation, t.data.ud.name, arg_number);
@@ -1242,16 +1372,31 @@ void emit_checker(const struct type t, int arg_number, int skipped, const char *
 void emit_userdata_field(const struct userdata *data, const struct userdata_field *field) {
   fprintf(source, "static int %s_%s(lua_State *L) {\n", data->sanatized_name, field->name);
   fprintf(source, "    %s *ud = check_%s(L, 1);\n", data->name, data->sanatized_name);
-  fprintf(source, "    switch(lua_gettop(L)) {\n");
+
+  char *index_string = "";
+  int write_arg_number = 2;
+  if (field->array_len != NULL) {
+    index_string = "[index]";
+    write_arg_number = 3;
+
+    fprintf(source, "\n    const lua_Integer raw_index = luaL_checkinteger(L, 2);\n");
+    fprintf(source, "    luaL_argcheck(L, ((raw_index >= 0) && (raw_index < MIN(%s, UINT8_MAX))), 2, \"index out of range\");\n",field->array_len);
+    fprintf(source, "    const uint8_t index = static_cast<uint8_t>(raw_index);\n\n");
+
+    fprintf(source, "    switch(lua_gettop(L)-1) {\n");
+
+  } else {
+    fprintf(source, "    switch(lua_gettop(L)) {\n");
+  }
 
   if (field->access_flags & ACCESS_FLAG_READ) {
     fprintf(source, "        case 1:\n");
     switch (field->type.type) {
       case TYPE_BOOLEAN:
-        fprintf(source, "            lua_pushinteger(L, ud->%s);\n", field->name);
+        fprintf(source, "            lua_pushinteger(L, ud->%s%s);\n", field->name, index_string);
         break;
       case TYPE_FLOAT:
-        fprintf(source, "            lua_pushnumber(L, ud->%s);\n", field->name);
+        fprintf(source, "            lua_pushnumber(L, ud->%s%s);\n", field->name, index_string);
         break;
       case TYPE_INT8_T:
       case TYPE_INT16_T:
@@ -1259,11 +1404,11 @@ void emit_userdata_field(const struct userdata *data, const struct userdata_fiel
       case TYPE_UINT8_T:
       case TYPE_UINT16_T:
       case TYPE_ENUM:
-        fprintf(source, "            lua_pushinteger(L, ud->%s);\n", field->name);
+        fprintf(source, "            lua_pushinteger(L, ud->%s%s);\n", field->name, index_string);
         break;
       case TYPE_UINT32_T:
         fprintf(source, "            new_uint32_t(L);\n");
-        fprintf(source, "            *static_cast<uint32_t *>(luaL_checkudata(L, -1, \"uint32_t\")) = ud->%s;\n", field->name);
+        fprintf(source, "            *static_cast<uint32_t *>(luaL_checkudata(L, -1, \"uint32_t\")) = ud->%s%s;\n", field->name, index_string);
         break;
       case TYPE_NONE:
         error(ERROR_INTERNAL, "Can't access a NONE field");
@@ -1272,13 +1417,13 @@ void emit_userdata_field(const struct userdata *data, const struct userdata_fiel
         error(ERROR_INTERNAL, "Can't access a literal field");
         break;
       case TYPE_STRING:
-        fprintf(source, "            lua_pushstring(L, ud->%s);\n", field->name);
+        fprintf(source, "            lua_pushstring(L, ud->%s%s);\n", field->name, index_string);
         break;
       case TYPE_USERDATA:
-        error(ERROR_USERDATA, "Userdata does not currently support accss to userdata field's");
+        error(ERROR_USERDATA, "Userdata does not currently support access to userdata field's");
         break;
       case TYPE_AP_OBJECT: // FIXME: collapse the identical cases here, and use the type string function
-        error(ERROR_USERDATA, "AP_Object does not currently support accss to userdata field's");
+        error(ERROR_USERDATA, "AP_Object does not currently support access to userdata field's");
         break;
     }
     fprintf(source, "            return 1;\n");
@@ -1286,8 +1431,8 @@ void emit_userdata_field(const struct userdata *data, const struct userdata_fiel
 
   if (field->access_flags & ACCESS_FLAG_WRITE) {
     fprintf(source, "        case 2: {\n");
-    emit_checker(field->type, 2, 0, "            ", field->name);
-    fprintf(source, "            ud->%s = data_2;\n", field->name);
+    emit_checker(field->type, write_arg_number, 0, "            ", field->name);
+    fprintf(source, "            ud->%s%s = data_%i;\n", field->name, index_string, write_arg_number);
     fprintf(source, "            return 0;\n");
     fprintf(source, "         }\n");
   }
@@ -1302,35 +1447,188 @@ void emit_userdata_fields() {
   struct userdata * node = parsed_userdata;
   while(node) {
     struct userdata_field *field = node->fields;
+    start_dependency(source, node->dependency);
     while(field) {
       emit_userdata_field(node, field);
       field = field->next;
     }
+    end_dependency(source, node->dependency);
     node = node->next;
   }
+}
+
+void emit_singleton_field(const struct userdata *data, const struct userdata_field *field) {
+  fprintf(source, "static int %s_%s(lua_State *L) {\n", data->sanatized_name, field->name);
+
+  // emit comments on expected arg/type
+  if (!(data->flags & UD_FLAG_LITERAL)) {
+      // fetch and check the singleton pointer
+      fprintf(source, "    %s * ud = %s::get_singleton();\n", data->name, data->name);
+      fprintf(source, "    if (ud == nullptr) {\n");
+      fprintf(source, "        return not_supported_error(L, %d, \"%s\");\n", 1, data->alias ? data->alias : data->name);
+      fprintf(source, "    }\n\n");
+  }
+  const char *ud_name = (data->flags & UD_FLAG_LITERAL)?data->name:"ud";
+  const char *ud_access = (data->flags & UD_FLAG_REFERENCE)?".":"->";
+
+  char *index_string = "";
+  int write_arg_number = 2;
+  if (field->array_len != NULL) {
+    index_string = "[index]";
+    write_arg_number = 3;
+
+    fprintf(source, "\n    const lua_Integer raw_index = luaL_checkinteger(L, 2);\n");
+    fprintf(source, "    luaL_argcheck(L, ((raw_index >= 0) && (raw_index < MIN(%s, UINT8_MAX))), 2, \"index out of range\");\n",field->array_len);
+    fprintf(source, "    const uint8_t index = static_cast<uint8_t>(raw_index);\n\n");
+
+    fprintf(source, "    switch(lua_gettop(L)-1) {\n");
+
+  } else {
+    fprintf(source, "    switch(lua_gettop(L)) {\n");
+  }
+
+  if (field->access_flags & ACCESS_FLAG_READ) {
+    fprintf(source, "        case 1:\n");
+    switch (field->type.type) {
+      case TYPE_BOOLEAN:
+        fprintf(source, "            lua_pushinteger(L, %s%s%s%s);\n", ud_name, ud_access, field->name, index_string);
+        break;
+      case TYPE_FLOAT:
+        fprintf(source, "            lua_pushnumber(L, %s%s%s%s);\n", ud_name, ud_access, field->name, index_string);
+        break;
+      case TYPE_INT8_T:
+      case TYPE_INT16_T:
+      case TYPE_INT32_T:
+      case TYPE_UINT8_T:
+      case TYPE_UINT16_T:
+      case TYPE_ENUM:
+        fprintf(source, "            lua_pushinteger(L, %s%s%s%s);\n", ud_name, ud_access, field->name, index_string);
+        break;
+      case TYPE_UINT32_T:
+        fprintf(source, "            new_uint32_t(L);\n");
+        fprintf(source, "            *static_cast<uint32_t *>(luaL_checkudata(L, -1, \"uint32_t\")) = %s%s%s%s;\n", ud_name, ud_access, field->name, index_string);
+        break;
+      case TYPE_NONE:
+        error(ERROR_INTERNAL, "Can't access a NONE field");
+        break;
+      case TYPE_LITERAL:
+        error(ERROR_INTERNAL, "Can't access a literal field");
+        break;
+      case TYPE_STRING:
+        fprintf(source, "            lua_pushstring(L, %s%s%s%s);\n", ud_name, ud_access, field->name, index_string);
+        break;
+      case TYPE_USERDATA:
+        error(ERROR_USERDATA, "Userdata does not currently support access to userdata field's");
+        break;
+      case TYPE_AP_OBJECT: // FIXME: collapse the identical cases here, and use the type string function
+        error(ERROR_USERDATA, "AP_Object does not currently support access to userdata field's");
+        break;
+    }
+    fprintf(source, "            return 1;\n");
+  }
+
+  if (field->access_flags & ACCESS_FLAG_WRITE) {
+    fprintf(source, "        case 2: {\n");
+    emit_checker(field->type, write_arg_number, 0, "            ", field->name);
+    fprintf(source, "            %s%s%s%s = data_%i;\n", ud_name, ud_access, field->name, index_string, write_arg_number);
+    fprintf(source, "            return 0;\n");
+    fprintf(source, "         }\n");
+  }
+
+  fprintf(source, "        default:\n");
+  fprintf(source, "            return luaL_argerror(L, lua_gettop(L), \"too many arguments\");\n");
+  fprintf(source, "    }\n");
+  fprintf(source, "}\n\n");
+}
+
+void emit_singleton_fields() {
+  struct userdata * node = parsed_singletons;
+  while(node) {
+    struct userdata_field *field = node->fields;
+    start_dependency(source, node->dependency);
+    while(field) {
+      emit_singleton_field(node, field);
+      field = field->next;
+    }
+    end_dependency(source, node->dependency);
+    node = node->next;
+  }
+}
+
+// emit refences functions for a call, return the number of arduments added
+int emit_references(const struct argument *arg, const char * tab) {
+  int arg_index = NULLABLE_ARG_COUNT_BASE + 2;
+  int return_count = 0;
+  while (arg != NULL) {
+    if (arg->type.flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE)) {
+      return_count++;
+      switch (arg->type.type) {
+        case TYPE_BOOLEAN:
+          fprintf(source, "%slua_pushboolean(L, data_%d);\n", tab, arg_index);
+          break;
+        case TYPE_FLOAT:
+          fprintf(source, "%slua_pushnumber(L, data_%d);\n", tab, arg_index);
+          break;
+        case TYPE_INT8_T:
+        case TYPE_INT16_T:
+        case TYPE_INT32_T:
+        case TYPE_UINT8_T:
+        case TYPE_UINT16_T:
+        case TYPE_ENUM:
+          fprintf(source, "%slua_pushinteger(L, data_%d);\n", tab, arg_index);
+          break;
+        case TYPE_UINT32_T:
+          fprintf(source, "%snew_uint32_t(L);\n", tab);
+          fprintf(source, "%s*static_cast<uint32_t *>(luaL_checkudata(L, -1, \"uint32_t\")) = data_%d;\n", tab, arg_index);
+          break;
+        case TYPE_STRING:
+          fprintf(source, "%slua_pushstring(L, data_%d);\n", tab, arg_index);
+          break;
+        case TYPE_USERDATA:
+          // userdatas must allocate a new container to return
+          fprintf(source, "%snew_%s(L);\n", tab, arg->type.data.ud.sanatized_name);
+          fprintf(source, "%s*check_%s(L, -1) = data_%d;\n", tab, arg->type.data.ud.sanatized_name, arg_index);
+          break;
+        case TYPE_NONE:
+          error(ERROR_INTERNAL, "Attempted to emit a nullable or reference  argument of type none");
+          break;
+        case TYPE_LITERAL:
+          error(ERROR_INTERNAL, "Attempted to make a nullable or reference literal");
+          break;
+        case TYPE_AP_OBJECT: // FIXME: collapse these to a single failure case
+          error(ERROR_INTERNAL, "Attempted to make a nullable or reference ap_object");
+          break;
+      }
+    }
+    arg_index++;
+    arg = arg->next;
+  }
+  return return_count;
 }
 
 void emit_userdata_method(const struct userdata *data, const struct method *method) {
   int arg_count = 1;
 
+  start_dependency(source, data->dependency);
+
   const char *access_name = data->alias ? data->alias : data->name;
   // bind ud early if it's a singleton, so that we can use it in the range checks
-  fprintf(source, "static int %s_%s(lua_State *L) {\n", data->sanatized_name, method->name);
+  fprintf(source, "static int %s_%s(lua_State *L) {\n", data->sanatized_name, method->sanatized_name);
   // emit comments on expected arg/type
   struct argument *arg = method->arguments;
 
-  if (data->ud_type == UD_SINGLETON) {
+  if ((data->ud_type == UD_SINGLETON) && !(data->flags & UD_FLAG_LITERAL)) {
       // fetch and check the singleton pointer
       fprintf(source, "    %s * ud = %s::get_singleton();\n", data->name, data->name);
       fprintf(source, "    if (ud == nullptr) {\n");
-      fprintf(source, "        return luaL_argerror(L, %d, \"%s not supported on this firmware\");\n", arg_count, access_name);
+      fprintf(source, "        return not_supported_error(L, %d, \"%s\");\n", arg_count, access_name);
       fprintf(source, "    }\n\n");
   }
 
   // sanity check number of args called with
   arg_count = 1;
   while (arg != NULL) {
-    if (!(arg->type.flags & TYPE_FLAGS_NULLABLE) && !(arg->type.type == TYPE_LITERAL)) {
+    if (!(arg->type.flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE)) && !(arg->type.type == TYPE_LITERAL)) {
       arg_count++;
     }
     arg = arg->next;
@@ -1365,17 +1663,20 @@ void emit_userdata_method(const struct userdata *data, const struct method *meth
       arg_count++;
     }
     if (//arg->type.type == TYPE_LITERAL ||
-        arg->type.flags & TYPE_FLAGS_NULLABLE) {
+        arg->type.flags & (TYPE_FLAGS_NULLABLE| TYPE_FLAGS_REFERNCE)) {
       skipped++;
     }
     arg = arg->next;
   }
 
-  if (data->flags & UD_FLAG_SEMAPHORE) {
-    fprintf(source, "    ud->get_semaphore().take_blocking();\n");
-  }
+  const char *ud_name = (data->flags & UD_FLAG_LITERAL)?data->name:"ud";
+  const char *ud_access = (data->flags & UD_FLAG_REFERENCE)?".":"->";
 
-  if (data->flags & UD_FLAG_SCHEDULER_SEMAPHORE) {
+  if (data->flags & UD_FLAG_SEMAPHORE) {
+    fprintf(source, "    %s%sget_semaphore().take_blocking();\n", ud_name, ud_access);
+  } else if (data->flags & UD_FLAG_SEMAPHORE_POINTER) {
+    fprintf(source, "    %s%sget_semaphore()->take_blocking();\n", ud_name, ud_access);
+  } else if (data->flags & UD_FLAG_SCHEDULER_SEMAPHORE) {
     fprintf(source, "    AP::scheduler().get_semaphore().take_blocking();\n");
   }
 
@@ -1383,23 +1684,23 @@ void emit_userdata_method(const struct userdata *data, const struct method *meth
 
   switch (method->return_type.type) {
     case TYPE_STRING:
-      fprintf(source, "    const char * data = ud->%s(", method->name);
+      fprintf(source, "    const char * data = %s%s%s(", ud_name, ud_access, method->name);
       static_cast = FALSE;
       break;
     case TYPE_ENUM:
-      fprintf(source, "    const %s &data = ud->%s(", method->return_type.data.enum_name, method->name);
+      fprintf(source, "    const %s &data = %s%s%s(", method->return_type.data.enum_name, ud_name, ud_access, method->name);
       static_cast = FALSE;
       break;
     case TYPE_USERDATA:
-      fprintf(source, "    const %s &data = ud->%s(", method->return_type.data.ud.name, method->name);
+      fprintf(source, "    const %s &data = %s%s%s(", method->return_type.data.ud.name, ud_name, ud_access, method->name);
       static_cast = FALSE;
       break;
     case TYPE_AP_OBJECT:
-      fprintf(source, "    %s *data = ud->%s(", method->return_type.data.ud.name, method->name);
+      fprintf(source, "    %s *data = %s%s%s(", method->return_type.data.ud.name, ud_name, ud_access, method->name);
       static_cast = FALSE;
       break;
     case TYPE_NONE:
-      fprintf(source, "    ud->%s(", method->name);
+      fprintf(source, "    %s%s%s(", ud_name, ud_access, method->name);
       static_cast = FALSE;
       break;
     case TYPE_LITERAL:
@@ -1452,7 +1753,7 @@ void emit_userdata_method(const struct userdata *data, const struct method *meth
         error(ERROR_USERDATA, "Unexpected type");
         break;
     }
-    fprintf(source, "    const %s data = static_cast<%s>(ud->%s(", var_type_name, var_type_name, method->name);
+    fprintf(source, "    const %s data = static_cast<%s>(%s%s%s(", var_type_name, var_type_name, ud_name, ud_access, method->name);
   }
 
   if (arg_count != 2) {
@@ -1475,7 +1776,7 @@ void emit_userdata_method(const struct userdata *data, const struct method *meth
       case TYPE_ENUM:
       case TYPE_USERDATA:
       case TYPE_AP_OBJECT:
-        fprintf(source, "            data_%d", arg_count + ((arg->type.flags & TYPE_FLAGS_NULLABLE) ? NULLABLE_ARG_COUNT_BASE : 0));
+        fprintf(source, "            %sdata_%d", (arg->type.access == ACCESS_REFERENCE)?"&":"", arg_count + ((arg->type.flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE)) ? NULLABLE_ARG_COUNT_BASE : 0));
         break;
       case TYPE_LITERAL:
         fprintf(source, "            %s", arg->type.data.literal);
@@ -1499,71 +1800,31 @@ void emit_userdata_method(const struct userdata *data, const struct method *meth
   }
 
   if (data->flags & UD_FLAG_SEMAPHORE) {
-    fprintf(source, "    ud->get_semaphore().give();\n");
-  }
-
-  if (data->flags & UD_FLAG_SCHEDULER_SEMAPHORE) {
+    fprintf(source, "    %s%sget_semaphore().give();\n", ud_name, ud_access);
+  } else if (data->flags & UD_FLAG_SEMAPHORE_POINTER) {
+    fprintf(source, "    %s%sget_semaphore()->give();\n", ud_name, ud_access);
+  } else if (data->flags & UD_FLAG_SCHEDULER_SEMAPHORE) {
     fprintf(source, "    AP::scheduler().get_semaphore().give();\n");
   }
 
-  int return_count = 1; // number of arguments to return
+  // we need to emit out refernce arguments, iterate the args again, creating and copying objects, while keeping a new count
+  int return_count = 1; 
+  if (method->flags & TYPE_FLAGS_REFERNCE) {
+    arg = method->arguments;
+    // number of arguments to return
+    return_count += emit_references(arg,"    ");
+  }
+
   switch (method->return_type.type) {
     case TYPE_BOOLEAN:
       if (method->flags & TYPE_FLAGS_NULLABLE) {
         fprintf(source, "    if (data) {\n");
         // we need to emit out nullable arguments, iterate the args again, creating and copying objects, while keeping a new count
-        return_count = 0;
         arg = method->arguments;
-        int arg_index = NULLABLE_ARG_COUNT_BASE + 2;
-        while (arg != NULL) {
-          if (arg->type.flags & TYPE_FLAGS_NULLABLE) {
-            return_count++;
-            switch (arg->type.type) {
-              case TYPE_BOOLEAN:
-                fprintf(source, "        lua_pushboolean(L, data_%d);\n", arg_index);
-                break;
-              case TYPE_FLOAT:
-                fprintf(source, "        lua_pushnumber(L, data_%d);\n", arg_index);
-                break;
-              case TYPE_INT8_T:
-              case TYPE_INT16_T:
-              case TYPE_INT32_T:
-              case TYPE_UINT8_T:
-              case TYPE_UINT16_T:
-              case TYPE_ENUM:
-                fprintf(source, "        lua_pushinteger(L, data_%d);\n", arg_index);
-                break;
-              case TYPE_UINT32_T:
-                fprintf(source, "        new_uint32_t(L);\n");
-                fprintf(source, "        *static_cast<uint32_t *>(luaL_checkudata(L, -1, \"uint32_t\")) = data_%d;\n", arg_index);
-                break;
-              case TYPE_STRING:
-                fprintf(source, "        lua_pushstring(L, data_%d);\n", arg_index);
-                break;
-              case TYPE_USERDATA:
-                // userdatas must allocate a new container to return
-                fprintf(source, "        new_%s(L);\n", arg->type.data.ud.sanatized_name);
-                fprintf(source, "        *check_%s(L, -1) = data_%d;\n", arg->type.data.ud.sanatized_name, arg_index);
-                break;
-              case TYPE_NONE:
-                error(ERROR_INTERNAL, "Attempted to emit a nullable argument of type none");
-                break;
-              case TYPE_LITERAL:
-                error(ERROR_INTERNAL, "Attempted to make a nullable literal");
-                break;
-              case TYPE_AP_OBJECT: // FIXME: collapse these to a single failure case
-                error(ERROR_INTERNAL, "Attempted to make a nullable ap_object");
-                break;
-            }
-          }
-
-          arg_index++;
-          arg = arg->next;
-        }
+        return_count = emit_references(arg,"        ");
         fprintf(source, "        return %d;\n", return_count);
-        fprintf(source, "    } else {\n");
-        fprintf(source, "        return 0;\n");
         fprintf(source, "    }\n");
+        fprintf(source, "    return 0;\n");
       } else {
         fprintf(source, "    lua_pushboolean(L, data);\n");
       }
@@ -1593,16 +1854,15 @@ void emit_userdata_method(const struct userdata *data, const struct method *meth
       break;
     case TYPE_AP_OBJECT:
       fprintf(source, "    if (data == NULL) {\n");
-      fprintf(source, "        lua_pushnil(L);\n");
-      fprintf(source, "    } else {\n");
-      fprintf(source, "        new_%s(L);\n", method->return_type.data.ud.sanatized_name);
-      fprintf(source, "        *check_%s(L, -1) = data;\n", method->return_type.data.ud.sanatized_name);
+      fprintf(source, "        return 0;\n");
       fprintf(source, "    }\n");
+      fprintf(source, "    new_%s(L);\n", method->return_type.data.ud.sanatized_name);
+      fprintf(source, "    *check_%s(L, -1) = data;\n", method->return_type.data.ud.sanatized_name);
       break;
     case TYPE_NONE:
     case TYPE_LITERAL:
       // no return value, so don't worry about pushing a value
-      return_count = 0;
+      return_count--;
       break;
   }
 
@@ -1610,7 +1870,10 @@ void emit_userdata_method(const struct userdata *data, const struct method *meth
       fprintf(source, "    return %d;\n", return_count);
   }
 
-  fprintf(source, "}\n\n");
+  fprintf(source, "}\n");
+  end_dependency(source, data->dependency);
+  fprintf(source, "\n");
+
 }
 
 const char * get_name_for_operation(enum operator_type op) {
@@ -1696,17 +1959,18 @@ void emit_userdata_methods(struct userdata *node) {
 void emit_userdata_metatables(void) {
   struct userdata * node = parsed_userdata;
   while(node) {
+    start_dependency(source, node->dependency);
     fprintf(source, "const luaL_Reg %s_meta[] = {\n", node->sanatized_name);
 
     struct userdata_field *field = node->fields;
     while(field) {
-      fprintf(source, "    {\"%s\", %s_%s},\n", field->name, node->sanatized_name, field->name);
+      fprintf(source, "    {\"%s\", %s_%s},\n", field->alias ? field->alias : field->name, node->sanatized_name, field->name);
       field = field->next;
     }
 
     struct method *method = node->methods;
     while(method) {
-      fprintf(source, "    {\"%s\", %s_%s},\n", method->name, node->sanatized_name, method->name);
+      fprintf(source, "    {\"%s\", %s_%s},\n", method->alias ? method->alias :  method->name, node->sanatized_name, method->sanatized_name);
       method = method->next;
     }
 
@@ -1719,8 +1983,9 @@ void emit_userdata_metatables(void) {
     }
 
     fprintf(source, "    {NULL, NULL}\n");
-    fprintf(source, "};\n\n");
-
+    fprintf(source, "};\n");
+    end_dependency(source, node->dependency);
+    fprintf(source, "\n");
     node = node->next;
   }
 }
@@ -1728,16 +1993,25 @@ void emit_userdata_metatables(void) {
 void emit_singleton_metatables(struct userdata *head) {
   struct userdata * node = head;
   while(node) {
+    start_dependency(source, node->dependency);
     fprintf(source, "const luaL_Reg %s_meta[] = {\n", node->sanatized_name);
 
     struct method *method = node->methods;
     while (method) {
-      fprintf(source, "    {\"%s\", %s_%s},\n", method->name, node->sanatized_name, method->name);
+      fprintf(source, "    {\"%s\", %s_%s},\n", method->alias ? method->alias :  method->name, node->sanatized_name, method->name);
       method = method->next;
     }
 
+    struct userdata_field *field = node->fields;
+    while(field) {
+      fprintf(source, "    {\"%s\", %s_%s},\n", field->alias ? field->alias : field->name, node->sanatized_name, field->name);
+      field = field->next;
+    }
+
     fprintf(source, "    {NULL, NULL}\n");
-    fprintf(source, "};\n\n");
+    fprintf(source, "};\n");
+    end_dependency(source, node->dependency);
+    fprintf(source, "\n");
 
     node = node->next;
   }
@@ -1746,13 +2020,16 @@ void emit_singleton_metatables(struct userdata *head) {
 void emit_enums(struct userdata * data) {
   while (data) {
     if (data->enums != NULL) {
+      start_dependency(source, data->dependency);
       fprintf(source, "struct userdata_enum %s_enums[] = {\n", data->sanatized_name);
       struct userdata_enum *ud_enum = data->enums;
       while (ud_enum != NULL) {
         fprintf(source, "    {\"%s\", %s::%s},\n", ud_enum->name, data->name, ud_enum->name);
         ud_enum = ud_enum->next;
       }
-      fprintf(source, "    {NULL, 0}};\n\n");
+      fprintf(source, "    {NULL, 0}};\n");
+      end_dependency(source, data->dependency);
+      fprintf(source, "\n");
     }
     data = data->next;
   }
@@ -1761,11 +2038,13 @@ void emit_enums(struct userdata * data) {
 void emit_metas(struct userdata * data, char * meta_name) {
   fprintf(source, "const struct userdata_meta %s_fun[] = {\n", meta_name);
   while (data) {
+    start_dependency(source, data->dependency);
     if (data->enums) {
       fprintf(source, "    {\"%s\", %s_meta, %s_enums},\n", data->alias ? data->alias : data->name, data->name, data->sanatized_name);
     } else {
       fprintf(source, "    {\"%s\", %s_meta, NULL},\n", data->alias ? data->alias : data->name, data->sanatized_name);
     }
+    end_dependency(source, data->dependency);
     data = data->next;
   }
   fprintf(source, "};\n\n");
@@ -1849,7 +2128,9 @@ void emit_sandbox(void) {
   struct userdata *single = parsed_singletons;
   fprintf(source, "const char *singletons[] = {\n");
   while (single) {
+    start_dependency(source, single->dependency);
     fprintf(source, "    \"%s\",\n", single->alias ? single->alias : single->sanatized_name);
+    end_dependency(source, single->dependency);
     single = single->next;
   }
   fprintf(source, "};\n\n");
@@ -1860,12 +2141,16 @@ void emit_sandbox(void) {
   fprintf(source, "    const lua_CFunction fun;\n");
   fprintf(source, "} new_userdata[] = {\n");
   while (data) {
-    fprintf(source, "    {\"%s\", new_%s},\n", data->name, data->sanatized_name);
+    start_dependency(source, data->dependency);
+    fprintf(source, "    {\"%s\", new_%s},\n", data->alias ? data->alias :  data->name, data->sanatized_name);
+    end_dependency(source, data->dependency);
     data = data->next;
   }
   data = parsed_ap_objects;
   while (data) {
+    start_dependency(source, data->dependency);
     fprintf(source, "    {\"%s\", new_%s},\n", data->name, data->sanatized_name);
+    end_dependency(source, data->dependency);
     data = data->next;
   }
   fprintf(source, "};\n\n");
@@ -1906,14 +2191,197 @@ void emit_argcheck_helper(void) {
   fprintf(source, "}\n\n");
 }
 
+void emit_not_supported_helper(void) {
+  fprintf(source, "static int not_supported_error(lua_State *L, int arg, const char* name) {\n");
+  fprintf(source, "    char error_msg[50];\n");
+  fprintf(source, "    snprintf(error_msg, sizeof(error_msg), \"%%s not supported on this firmware\", name);\n");
+  fprintf(source, "    return luaL_argerror(L, arg, error_msg);\n");
+  fprintf(source, "}\n\n");
+}
+
+void emit_docs_type(struct type type, const char *prefix, const char *suffix) {
+  switch (type.type) {
+    case TYPE_BOOLEAN:
+      fprintf(docs, "%s boolean%s", prefix, suffix);
+      break;
+    case TYPE_FLOAT:
+      fprintf(docs, "%s number%s", prefix, suffix);
+      break;
+    case TYPE_INT8_T:
+    case TYPE_INT16_T:
+    case TYPE_INT32_T:
+    case TYPE_UINT8_T:
+    case TYPE_UINT16_T:
+    case TYPE_ENUM:
+      fprintf(docs, "%s integer%s", prefix, suffix);
+      break;
+    case TYPE_STRING:
+      fprintf(docs, "%s string%s", prefix, suffix);
+      break;
+    case TYPE_UINT32_T:
+      fprintf(docs, "%s uint32_t_ud%s", prefix, suffix);
+      break;
+    case TYPE_USERDATA: {
+      // userdata may have alias
+      struct userdata *data = parsed_userdata;
+      int found = 0;
+      while (data) {
+        if (strcmp(type.data.ud.sanatized_name, data->sanatized_name) == 0) {
+          found = 1;
+          break;
+        }
+        data = data->next;
+      }
+      if (found == 0) {
+        error(ERROR_GENERAL, "Could not find userdata %s", type.data.ud.sanatized_name);
+      }
+      fprintf(docs, "%s %s_ud%s", prefix, data->alias ? data->alias : data->sanatized_name, suffix);
+      break;
+    }
+    case TYPE_AP_OBJECT:
+      fprintf(docs, "%s %s_ud%s", prefix, type.data.ud.sanatized_name, suffix);
+      break;
+    case TYPE_NONE:
+    case TYPE_LITERAL:
+      break;
+  }
+}
+
+void emit_docs(struct userdata *node, int is_userdata, int emit_creation) {
+  while(node) {
+    char *name = (char *)allocate(strlen(node->alias ? node->alias : node->sanatized_name) + 5);
+    if (is_userdata) {
+      sprintf(name, "%s_ud", node->alias ? node->alias : node->sanatized_name);
+    } else {
+      sprintf(name, "%s", node->alias ? node->alias : node->sanatized_name);
+    }
+
+
+    fprintf(docs, "-- desc\n");
+    fprintf(docs, "---@class %s\n", name);
+
+    // enums
+    if (node->enums != NULL) {
+      struct userdata_enum *ud_enum = node->enums;
+      while (ud_enum != NULL) {
+        fprintf(docs, "---@field %s number\n", ud_enum->name);
+        ud_enum = ud_enum->next;
+      }
+    }
+
+    if (is_userdata) {
+      // local userdata
+      fprintf(docs, "local %s = {}\n\n", name);
+
+      if (emit_creation) {
+        // creation function
+        fprintf(docs, "---@return %s\n", name);
+        fprintf(docs, "function %s() end\n\n", node->alias ? node->alias : node->sanatized_name);
+      }
+    } else {
+      // global
+      fprintf(docs, "%s = {}\n\n", name);
+    }
+
+
+    // fields
+    if (node->fields != NULL) {
+      struct userdata_field *field = node->fields;
+      while(field) {
+          if (field->array_len == NULL) {
+            // single value feild
+            if (field->access_flags & ACCESS_FLAG_READ) {
+              fprintf(docs, "-- get field\n");
+              emit_docs_type(field->type, "---@return", "\n");
+              fprintf(docs, "function %s:%s() end\n\n", name, field->alias ? field->alias : field->name);
+            }
+            if (field->access_flags & ACCESS_FLAG_WRITE) {
+              fprintf(docs, "-- set field\n");
+              emit_docs_type(field->type, "---@param value", "\n");
+              fprintf(docs, "function %s:%s(value) end\n\n", name, field->alias ? field->alias : field->name);
+            }
+          } else {
+            // array feild
+            if (field->access_flags & ACCESS_FLAG_READ) {
+              fprintf(docs, "-- get array field\n");
+              fprintf(docs, "---@param index integer\n");
+              emit_docs_type(field->type, "---@return", "\n");
+              fprintf(docs, "function %s:%s(index) end\n\n", name, field->alias ? field->alias : field->name);
+            }
+            if (field->access_flags & ACCESS_FLAG_WRITE) {
+              fprintf(docs, "-- set array field\n");
+              fprintf(docs, "---@param index integer\n");
+              emit_docs_type(field->type, "---@param value", "\n");
+              fprintf(docs, "function %s:%s(index, value) end\n\n", name, field->alias ? field->alias : field->name);
+            }
+          }
+        field = field->next;
+      }
+    }
+
+    // methods
+    struct method *method = node->methods;
+    while(method) {
+      fprintf(docs, "-- desc\n");
+
+      struct argument *arg = method->arguments;
+      int count = 1;
+      // input arguments
+      while (arg != NULL) {
+        if ((arg->type.type != TYPE_LITERAL) && (arg->type.flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE)) == 0) {
+          char *param_name = (char *)allocate(20);
+          sprintf(param_name, "---@param param%i", count);
+          emit_docs_type(arg->type, param_name, "\n");
+          free(param_name);
+          count++;
+        }
+        arg = arg->next;
+      }
+
+      // return type
+      if ((method->flags & TYPE_FLAGS_NULLABLE) == 0) {
+        emit_docs_type(method->return_type, "---@return", "\n");
+      }
+
+      arg = method->arguments;
+      // nulable and refences returns
+      while (arg != NULL) {
+        if ((arg->type.type != TYPE_LITERAL) && (arg->type.flags & (TYPE_FLAGS_NULLABLE | TYPE_FLAGS_REFERNCE))) {
+          if (arg->type.flags & TYPE_FLAGS_NULLABLE) {
+            emit_docs_type(arg->type, "---@return", "|nil\n");
+          } else {
+            emit_docs_type(arg->type, "---@return", "\n");
+          }
+        }
+        arg = arg->next;
+      }
+
+      // function name
+      fprintf(docs, "function %s:%s(", name, method->alias ? method->alias : method->name);
+      for (int i = 1; i < count; ++i) {
+        fprintf(docs, "param%i", i);
+        if (i < count-1) {
+          fprintf(docs, ", ");
+        }
+      }
+      fprintf(docs, ") end\n\n");
+      method = method->next;
+    }
+    fprintf(docs, "\n");
+    free(name);
+    node = node->next;
+  }
+}
+
 
 char * output_path = NULL;
+char * docs_path = NULL;
 
 int main(int argc, char **argv) {
   state.line_num = -1;
 
   int c;
-  while ((c = getopt(argc, argv, "i:o:")) != -1) {
+  while ((c = getopt(argc, argv, "i:o:d:")) != -1) {
     switch (c) {
       case 'i':
         if (description != NULL) {
@@ -1931,6 +2399,13 @@ int main(int argc, char **argv) {
         }
         output_path = optarg;
         trace(TRACE_GENERAL, "Loading an output path of %s", output_path);
+        break;
+      case 'd':
+        if (docs_path != NULL) {
+          error(ERROR_GENERAL, "An docs path was already selected.");
+        }
+        docs_path = optarg;
+        trace(TRACE_GENERAL, "Loading an docs path of %s", docs_path);
         break;
     }
   }
@@ -1957,8 +2432,6 @@ int main(int argc, char **argv) {
         handle_singleton();
       } else if (strcmp (state.token, keyword_ap_object) == 0){
         handle_ap_object();
-      } else if (strcmp (state.token, keyword_depends) == 0){
-        handle_depends();
       } else {
         error(ERROR_UNKNOWN_KEYWORD, "Expected a keyword, got: %s", state.token);
       }
@@ -1984,6 +2457,7 @@ int main(int argc, char **argv) {
 
   sanity_check_userdata();
 
+  fprintf(source, "#pragma GCC optimize(\"Os\")\n");
   fprintf(source, "#include \"lua_generated_bindings.h\"\n");
   fprintf(source, "#include <AP_Scripting/lua_boxed_numerics.h>\n");
 
@@ -1993,11 +2467,9 @@ int main(int argc, char **argv) {
 
   fprintf(source, "\n\n");
 
-  emit_dependencies(source);
-
-  fprintf(source, "\n\n");
-
   emit_argcheck_helper();
+
+  emit_not_supported_helper();
 
   emit_userdata_allocators();
 
@@ -2012,6 +2484,8 @@ int main(int argc, char **argv) {
   emit_userdata_methods(parsed_userdata);
 
   emit_userdata_metatables();
+
+  emit_singleton_fields();
 
   emit_userdata_methods(parsed_singletons);
 
@@ -2036,11 +2510,10 @@ int main(int argc, char **argv) {
   free(file_name);
   fprintf(header, "#pragma once\n");
   fprintf(header, "// auto generated bindings, don't manually edit.  See README.md for details.\n");
+  fprintf(header, "#include <AP_Vehicle/AP_Vehicle_Type.h> // needed for APM_BUILD_TYPE #if\n");
   emit_headers(header);
   fprintf(header, "#include <AP_Scripting/lua/src/lua.hpp>\n");
   fprintf(header, "#include <new>\n\n");
-  emit_dependencies(header);
-  fprintf(header, "\n\n");
 
   emit_userdata_declarations();
   emit_ap_object_declarations();
@@ -2050,6 +2523,29 @@ int main(int argc, char **argv) {
 
   fclose(header);
   header = NULL;
+
+  if (docs_path == NULL) {
+    // no docs to generate, all done
+    return 0;
+  }
+
+  docs = fopen(docs_path, "w");
+  if (docs == NULL) {
+    error(ERROR_GENERAL, "Unable to open the output docs file: %s", docs_path);
+  }
+
+  fprintf(docs, "-- ArduPilot lua scripting documentation in EmmyLua Annotations\n");
+  fprintf(docs, "-- This file should be auto generated and then manual edited\n");
+  fprintf(docs, "-- generate with --scripting-docs, eg  ./waf copter --scripting-docs\n");
+  fprintf(docs, "-- see: https://github.com/sumneko/lua-language-server/wiki/EmmyLua-Annotations\n\n");
+
+  emit_docs(parsed_userdata, TRUE, TRUE);
+
+  emit_docs(parsed_ap_objects, TRUE, FALSE);
+
+  emit_docs(parsed_singletons, FALSE, FALSE);
+
+  fclose(docs);
 
   return 0;
 }

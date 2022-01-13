@@ -42,12 +42,27 @@ struct dirent {
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
+
+#ifndef AP_FILESYSTEM_FORMAT_ENABLED
+// only enable for SDMMC filesystems for now as other types can't query
+// block size
+#define AP_FILESYSTEM_FORMAT_ENABLED (STM32_SDC_USE_SDMMC1==TRUE || STM32_SDC_USE_SDMMC2==TRUE)
+#endif
+
 #endif // HAL_BOARD_CHIBIOS
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX || CONFIG_HAL_BOARD == HAL_BOARD_SITL
 #include "AP_Filesystem_posix.h"
 #endif
 
+#if CONFIG_HAL_BOARD == HAL_BOARD_ESP32
+#include "AP_Filesystem_ESP32.h"
+#endif
+
 #include "AP_Filesystem_backend.h"
+
+#ifndef AP_FILESYSTEM_FORMAT_ENABLED
+#define AP_FILESYSTEM_FORMAT_ENABLED 0
+#endif
 
 class AP_Filesystem {
 private:
@@ -83,6 +98,23 @@ public:
     // set modification time on a file
     bool set_mtime(const char *filename, const uint32_t mtime_sec);
 
+    // if filesystem is not running then try a remount. Return true if fs is mounted
+    bool retry_mount(void);
+
+    // unmount filesystem for reboot
+    void unmount(void);
+
+    // returns null-terminated string; cr or lf terminates line
+    bool fgets(char *buf, uint8_t buflen, int fd);
+
+    // format filesystem
+    bool format(void);
+    
+    /*
+      load a full file. Use delete to free the data
+     */
+    FileData *load_file(const char *filename);
+    
 private:
     struct Backend {
         const char *prefix;

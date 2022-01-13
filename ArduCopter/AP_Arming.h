@@ -23,7 +23,7 @@ public:
 
     bool rc_calibration_checks(bool display_failure) override;
 
-    bool disarm(AP_Arming::Method method) override;
+    bool disarm(AP_Arming::Method method, bool do_disarm_checks=true) override;
     bool arm(AP_Arming::Method method, bool do_arming_checks=true) override;
 
 protected:
@@ -38,7 +38,6 @@ protected:
 
     // NOTE! the following check functions *DO* call into AP_Arming:
     bool ins_checks(bool display_failure) override;
-    bool compass_checks(bool display_failure) override;
     bool gps_checks(bool display_failure) override;
     bool barometer_checks(bool display_failure) override;
     bool board_voltage_checks(bool display_failure) override;
@@ -46,7 +45,6 @@ protected:
     // NOTE! the following check functions *DO NOT* call into AP_Arming!
     bool parameter_checks(bool display_failure);
     bool motor_checks(bool display_failure);
-    bool pilot_throttle_checks(bool display_failure);
     bool oa_checks(bool display_failure);
     bool mandatory_gps_checks(bool display_failure);
     bool gcs_failsafe_check(bool display_failure);

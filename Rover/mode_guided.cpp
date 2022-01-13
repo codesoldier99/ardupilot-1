@@ -3,16 +3,19 @@
 
 bool ModeGuided::_enter()
 {
-    // set desired location to reasonable stopping point
-    if (!g2.wp_nav.set_desired_location_to_stopping_location()) {
-        return false;
+    // initialise submode to stop or loiter
+    if (rover.is_boat()) {
+        if (!start_loiter()) {
+            start_stop();
+        }
+    } else {
+        start_stop();
     }
-    _guided_mode = Guided_WP;
 
     // initialise waypoint speed
     g2.wp_nav.set_desired_speed_to_default();
 
-    sent_notification = false;
+    send_notification = false;
 
     return true;
 }
@@ -28,8 +31,8 @@ void ModeGuided::update()
                 navigate_to_waypoint();
             } else {
                 // send notification
-                if (!sent_notification) {
-                    sent_notification = true;
+                if (send_notification) {
+                    send_notification = false;
                     rover.gcs().send_mission_item_reached_message(0);
                 }
 
@@ -129,6 +132,10 @@ void ModeGuided::update()
             break;
         }
 
+        case Guided_Stop:
+            stop_vehicle();
+            break;
+
         default:
             gcs().send_text(MAV_SEVERITY_WARNING, "Unknown GUIDED mode");
             break;
@@ -147,6 +154,7 @@ float ModeGuided::get_distance_to_destination() const
     case Guided_Loiter:
         return rover.mode_loiter.get_distance_to_destination();
     case Guided_SteeringAndThrottle:
+    case Guided_Stop:
         return 0.0f;
     }
 
@@ -164,6 +172,7 @@ bool ModeGuided::reached_destination() const
     case Guided_TurnRateAndSpeed:
     case Guided_Loiter:
     case Guided_SteeringAndThrottle:
+    case Guided_Stop:
         return true;
     }
 
@@ -188,6 +197,7 @@ bool ModeGuided::set_desired_speed(float speed)
     case Guided_Loiter:
         return rover.mode_loiter.set_desired_speed(speed);
     case Guided_SteeringAndThrottle:
+    case Guided_Stop:
         // no speed control
         return false;
     }
@@ -212,6 +222,7 @@ bool ModeGuided::get_desired_location(Location& destination) const
         // get destination from loiter
         return rover.mode_loiter.get_desired_location(destination);
     case Guided_SteeringAndThrottle:
+    case Guided_Stop:
         // no desired location in this submode
         break;
     }
@@ -228,7 +239,7 @@ bool ModeGuided::set_desired_location(const struct Location& destination,
 
         // handle guided specific initialisation and logging
         _guided_mode = ModeGuided::Guided_WP;
-        sent_notification = false;
+        send_notification = true;
         rover.Log_Write_GuidedTarget(_guided_mode, Vector3f(destination.lat, destination.lng, 0), Vector3f(g2.wp_nav.get_desired_speed(), 0.0f, 0.0f));
         return true;
     }
@@ -296,6 +307,13 @@ bool ModeGuided::start_loiter()
         return true;
     }
     return false;
+}
+
+
+// start stopping vehicle as quickly as possible
+void ModeGuided::start_stop()
+{
+    _guided_mode = Guided_Stop;
 }
 
 // set guided timeout and movement limits

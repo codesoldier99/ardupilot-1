@@ -60,7 +60,6 @@ enum AutoMode {
     Auto_WP,
     Auto_CircleMoveToEdge,
     Auto_Circle,
-    Auto_Spline,
     Auto_NavGuided,
     Auto_Loiter,
     Auto_TerrainRecover
@@ -83,7 +82,7 @@ enum RTLState {
     RTL_Land
 };
 
-//  Logging parameters
+//  Logging parameters - only 32 messages are available to the vehicle here.
 enum LoggingParameters {
     LOG_CONTROL_TUNING_MSG,
     LOG_DATA_INT16_MSG,

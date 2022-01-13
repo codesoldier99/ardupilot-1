@@ -35,9 +35,9 @@ extern const AP_HAL::HAL& hal;
 // important as frequency resolution. Referred to as [Heinz] throughout the code.
 
 // initialize the FFT state machine
-AP_HAL::DSP::FFTWindowState* DSP::fft_init(uint16_t window_size, uint16_t sample_rate, uint8_t harmonics)
+AP_HAL::DSP::FFTWindowState* DSP::fft_init(uint16_t window_size, uint16_t sample_rate)
 {
-    DSP::FFTWindowStateSITL* fft = new DSP::FFTWindowStateSITL(window_size, sample_rate, harmonics);
+    DSP::FFTWindowStateSITL* fft = new DSP::FFTWindowStateSITL(window_size, sample_rate);
     if (fft == nullptr || fft->_hanning_window == nullptr || fft->_rfft_data == nullptr || fft->_freq_bins == nullptr || fft->_derivative_freq_bins == nullptr) {
         delete fft;
         return nullptr;
@@ -61,8 +61,8 @@ uint16_t DSP::fft_analyse(AP_HAL::DSP::FFTWindowState* state, uint16_t start_bin
 }
 
 // create an instance of the FFT state machine
-DSP::FFTWindowStateSITL::FFTWindowStateSITL(uint16_t window_size, uint16_t sample_rate, uint8_t harmonics)
-    : AP_HAL::DSP::FFTWindowState::FFTWindowState(window_size, sample_rate, harmonics)
+DSP::FFTWindowStateSITL::FFTWindowStateSITL(uint16_t window_size, uint16_t sample_rate)
+    : AP_HAL::DSP::FFTWindowState::FFTWindowState(window_size, sample_rate)
 {
     if (_freq_bins == nullptr || _hanning_window == nullptr || _rfft_data == nullptr || _derivative_freq_bins == nullptr) {
         GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "Failed to allocate window for DSP");
@@ -84,7 +84,9 @@ void DSP::step_hanning(FFTWindowStateSITL* fft, FloatBuffer& samples, uint16_t a
     // apply hanning window to gyro samples and store result in _freq_bins
     // hanning starts and ends with 0, could be skipped for minor speed improvement
     uint32_t read_window = samples.peek(&fft->_freq_bins[0], fft->_window_size);
-    assert(read_window == fft->_window_size);
+    if (read_window != fft->_window_size) {
+        return;
+    }
     samples.advance(advance);
     mult_f32(&fft->_freq_bins[0], &fft->_hanning_window[0], &fft->_freq_bins[0], fft->_window_size);
 }

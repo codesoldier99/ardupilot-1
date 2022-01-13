@@ -32,9 +32,9 @@ void Tracker::init_ardupilot()
     log_init();
 #endif
 
-#ifdef ENABLE_SCRIPTING
+#if AP_SCRIPTING_ENABLED
     scripting.init();
-#endif // ENABLE_SCRIPTING
+#endif // AP_SCRIPTING_ENABLED
 
     // initialise compass
     AP::compass().set_log_bit(MASK_LOG_COMPASS);
@@ -59,6 +59,7 @@ void Tracker::init_ardupilot()
     serial_manager.set_blocking_writes_all(false);
 
     // initialise rc channels including setting mode
+    rc().convert_options(RC_Channel::AUX_FUNC::ARMDISARM_UNUSED, RC_Channel::AUX_FUNC::ARMDISARM);
     rc().init();
 
     // initialise servos
@@ -79,7 +80,6 @@ void Tracker::init_ardupilot()
         get_home_eeprom(current_loc);
     }
 
-    gcs().send_text(MAV_SEVERITY_INFO,"Ready to track");
     hal.scheduler->delay(1000); // Why????
 
     Mode *newmode = mode_from_mode_num((Mode::Number)g.initial_mode.get());
@@ -93,15 +93,12 @@ void Tracker::init_ardupilot()
         // for some servos)
         prepare_servos();
     }
-
-    // disable safety if requested
-    BoardConfig.init_safety();    
 }
 
 /*
   fetch HOME from EEPROM
 */
-bool Tracker::get_home_eeprom(struct Location &loc)
+bool Tracker::get_home_eeprom(struct Location &loc) const
 {
     // Find out proper location in memory by using the start_byte position + the index
     // --------------------------------------------------------------------------------
@@ -177,6 +174,8 @@ void Tracker::prepare_servos()
 
 void Tracker::set_mode(Mode &newmode, const ModeReason reason)
 {
+    control_mode_reason = reason;
+
     if (mode == &newmode) {
         // don't switch modes if we are already in the correct mode.
         return;
@@ -247,6 +246,7 @@ bool Tracker::should_log(uint32_t mask)
 // dummy method to avoid linking AFS
 bool AP_AdvancedFailsafe::gcs_terminate(bool should_terminate, const char *reason) {return false;}
 AP_AdvancedFailsafe *AP::advancedfailsafe() { return nullptr; }
-
+#if HAL_ADSB_ENABLED
 // dummy method to avoid linking AP_Avoidance
 AP_Avoidance *AP::ap_avoidance() { return nullptr; }
+#endif

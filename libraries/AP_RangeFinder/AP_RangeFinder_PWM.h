@@ -36,15 +36,13 @@ public:
 
 protected:
 
-    bool get_reading(uint16_t &reading_cm);
+    bool get_reading(float &reading_m);
 
     MAV_DISTANCE_SENSOR _get_mav_distance_sensor_type() const override {
         return MAV_DISTANCE_SENSOR_UNKNOWN;
     }
 
 private:
-
-    int8_t last_warn_pin; // last pin used for reading pwm (used to recognise change in pin assignment)
 
     bool check_pin();
     void check_stop_pin();

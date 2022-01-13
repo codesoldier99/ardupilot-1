@@ -128,9 +128,11 @@ void AP_Hott_Telem::send_EAM(void)
 
     const AP_Baro &baro = AP::baro();
     msg.temp1 = uint8_t(baro.get_temperature(0) + 20.5);
+#if BARO_MAX_INSTANCES > 1
     if (baro.healthy(1)) {
         msg.temp2 = uint8_t(baro.get_temperature(1) + 20.5);
     }
+#endif
 
     AP_AHRS &ahrs = AP::ahrs();
     float alt = 0;
@@ -275,18 +277,7 @@ void AP_Hott_Telem::send_GPS(void)
     msg.vel_east = vel.y * 1000 + 0.5;
     msg.altitude = uint16_t(500.5 + alt);
 
-    switch (gps.status()) {
-    case AP_GPS::NO_GPS:
-    case AP_GPS::NO_FIX:
-        msg.gps_fix_char = '-';
-        break;
-    case AP_GPS::GPS_OK_FIX_2D:
-        msg.gps_fix_char = '2';
-        break;
-    default:
-        msg.gps_fix_char = '3';
-        break;
-    }
+    msg.gps_fix_char = gps.status_onechar();
     msg.free_char3 = msg.gps_fix_char;
 
     msg.home_direction = degrees(atan2f(home_vec.y, home_vec.x)) * 0.5 + 0.5;

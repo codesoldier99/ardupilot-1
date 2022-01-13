@@ -1,11 +1,11 @@
 # hw definition file for processing by chibios_hwdef.py
 
+define HAL_CHIBIOS_ARCH_CUBE 1
+
 # USB setup
 USB_VENDOR 0x2DAE # ONLY FOR USE BY HEX! NOBODY ELSE
 USB_PRODUCT 0x1016
 USB_STRING_MANUFACTURER "Hex/ProfiCNC"
-USB_STRING_PRODUCT "CubeOrange"
-USB_STRING_SERIAL  "%SERIAL%"
 
 # MCU class and specific type
 MCU STM32H7xx STM32H743xx
@@ -23,7 +23,7 @@ env OPTIMIZE -O2
 
 FLASH_RESERVE_START_KB 128
 
-define HAL_STORAGE_SIZE 16384
+define HAL_STORAGE_SIZE 32768
 
 # order of I2C buses
 I2C_ORDER I2C2 I2C1
@@ -51,7 +51,11 @@ PA5 SPI1_SCK SPI1
 PA6 SPI1_MISO SPI1
 PA7 SPI1_MOSI SPI1
 
-PA8 VDD_5V_PERIPH_EN OUTPUT LOW
+# This defines an output pin which will default to output HIGH. It is
+# a pin that enables peripheral power on this board. It starts in the
+# off state, then is pulled low to enable peripherals in
+# peripheral_power_enable()
+PA8 nVDD_5V_PERIPH_EN OUTPUT HIGH
 
 # This is the pin that senses USB being connected. It is an input pin
 # setup as OPENDRAIN.
@@ -142,6 +146,10 @@ PD4 USART2_RTS USART2
 PD5 USART2_TX USART2
 PD6 USART2_RX USART2
 
+# telem1 RTS and CTS as GPIO in alt config 1
+PD3 EXTERN_GPIO4 OUTPUT GPIO(4) ALT(1)
+PD4 EXTERN_GPIO5 OUTPUT GPIO(5) ALT(1)
+
 # The telem2 USART, also with RTS/CTS available.
 # USART3 serial3 telem2
 PD8 USART3_TX USART3
@@ -165,14 +173,8 @@ PE9  TIM1_CH1 TIM1 PWM(4) GPIO(53)
 PD13 TIM4_CH2 TIM4 PWM(5) GPIO(54)
 PD14 TIM4_CH3 TIM4 PWM(6) GPIO(55)
 
-define BOARD_PWM_COUNT_DEFAULT 4
-
 # Pin for PWM Voltage Selection
 PB4 PWM_VOLT_SEL OUTPUT HIGH GPIO(3)
-
-# Relays default to use GPIO pins 54 and 55.
-define RELAY1_PIN_DEFAULT 54
-define RELAY2_PIN_DEFAULT 55
 
 # This is the invensense data-ready pin. We don't use it in the
 # default driver.
@@ -190,8 +192,9 @@ PE6 SPI4_MOSI SPI4
 
 # This is the pin to enable the sensors rail. It can be used to power
 # cycle sensors to recover them in case there are problems with power on
-# timing affecting sensor stability. We pull it high by default.
-PE3 VDD_3V3_SENSORS_EN OUTPUT HIGH
+# timing affecting sensor stability. We pull it LOW on startup, which
+# means sensors off, then it is pulled HIGH in peripheral_power_enable()
+PE3 VDD_3V3_SENSORS_EN OUTPUT LOW
 
 # UART7 maps to uartF in the HAL (serial5 in SERIALn_ parameters).
 PE7 UART7_RX UART7
@@ -229,12 +232,12 @@ SPIDEV external0m2    SPI4 DEVID5  MPU_EXT_CS   MODE2  2*MHZ  2*MHZ
 SPIDEV external0m3    SPI4 DEVID5  MPU_EXT_CS   MODE3  2*MHZ  2*MHZ
 SPIDEV pixartPC15     SPI4 DEVID13 ACCEL_EXT_CS MODE3  2*MHZ  2*MHZ
 
-# three IMUs, but allow for different varients. First two IMUs are
+# three IMUs, but allow for different variants. First two IMUs are
 # isolated, 3rd isn't
 IMU Invensense SPI:mpu9250_ext ROTATION_PITCH_180
 
 # the 3 rotations for the LSM9DS0 driver are for the accel, the gyro
-# and the H varient of the gyro
+# and the H variant of the gyro
 IMU LSM9DS0 SPI:lsm9ds0_ext_g SPI:lsm9ds0_ext_am ROTATION_ROLL_180_YAW_270 ROTATION_ROLL_180_YAW_90 ROTATION_ROLL_180_YAW_90
 
 # 3rd non-isolated IMU
@@ -246,9 +249,9 @@ IMU Invensensev2 SPI:icm20948_ext ROTATION_PITCH_180
 IMU Invensensev2 SPI:icm20948 ROTATION_YAW_270
 
 # Sensor Check alias for validating board type
-CHECK_ICM20649          spi_check_register("icm20948", INV2REG_WHOAMI, INV2_WHOAMI_ICM20649)
+CHECK_ICM20649          spi_check_register_inv2("icm20948", INV2REG_WHOAMI, INV2_WHOAMI_ICM20649)
 CHECK_ICM20602_EXT      spi_check_register("icm20602_ext", MPUREG_WHOAMI, MPU_WHOAMI_ICM20602)
-CHECK_ICM20948_EXT      spi_check_register("icm20948_ext", INV2REG_WHOAMI, INV2_WHOAMI_ICM20948)
+CHECK_ICM20948_EXT      spi_check_register_inv2("icm20948_ext", INV2REG_WHOAMI, INV2_WHOAMI_ICM20948)
 CHECK_MS5611            check_ms5611("ms5611")
 CHECK_MS5611_EXT        check_ms5611("ms5611_ext")
 
@@ -276,6 +279,10 @@ COMPASS AK8963:probe_mpu9250 1 ROTATION_YAW_270
 # compass as part of ICM20948 on newer cubes
 COMPASS AK09916:probe_ICM20948 0 ROTATION_ROLL_180_YAW_90
 
+# offset the internal compass for EM impact of the IMU heater
+# this is in sensor frame mGauss
+define HAL_AK09916_HEATER_OFFSET Vector3f(30,10,235)
+
 # also probe for external compasses
 define HAL_PROBE_EXTERNAL_I2C_COMPASSES
 
@@ -293,9 +300,15 @@ define HAL_HAVE_SAFETY_SWITCH 1
 # Enable RAMTROM parameter storage.
 define HAL_WITH_RAMTRON 1
 
-# Setup for the possibility of an IMU heater since the pixhawk2 cube has
-# an IMU heater.
+# Setup the IMU heater
 define HAL_HAVE_IMU_HEATER 1
+define HAL_IMU_TEMP_DEFAULT 45
+define HAL_IMUHEAT_P_DEFAULT 50
+define HAL_IMUHEAT_I_DEFAULT 0.07
+define HAL_IMU_TEMP_MARGIN_LOW_DEFAULT 5
+
+# Enable all IMUs to be used and therefore three active EKF Lanes
+define HAL_EKF_IMU_MASK_DEFAULT 7
 
 # Enable FAT filesystem support (needs a microSD defined via SDMMC).
 define HAL_OS_FATFS_IO 1

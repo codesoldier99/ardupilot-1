@@ -22,14 +22,28 @@ void LoggerMessageWriter::reset()
     _finished = false;
 }
 
+bool LoggerMessageWriter::out_of_time_for_writing_messages() const
+{
+#if HAL_SCHEDULER_ENABLED
+    return AP::scheduler().time_available_usec() < MIN_LOOP_TIME_REMAINING_FOR_MESSAGE_WRITE_US;
+#else
+    return false;
+#endif
+}
+
 void LoggerMessageWriter_DFLogStart::reset()
 {
     LoggerMessageWriter::reset();
 
     _fmt_done = false;
+    _params_done = false;
     _writesysinfo.reset();
+#if HAL_MISSION_ENABLED
     _writeentiremission.reset();
+#endif
+#if HAL_RALLY_ENABLED
     _writeallrallypoints.reset();
+#endif
 
     stage = Stage::FORMATS;
     next_format_to_send = 0;
@@ -39,29 +53,52 @@ void LoggerMessageWriter_DFLogStart::reset()
     ap = AP_Param::first(&token, &type);
 }
 
+bool LoggerMessageWriter_DFLogStart::out_of_time_for_writing_messages() const
+{
+    if (stage == Stage::FORMATS) {
+        // write out the FMT messages as fast as we can
+#if HAL_SCHEDULER_ENABLED
+        return AP::scheduler().time_available_usec() == 0;
+#else
+        return false;
+#endif
+    }
+    return LoggerMessageWriter::out_of_time_for_writing_messages();
+}
+
 void LoggerMessageWriter_DFLogStart::process()
 {
+    if (out_of_time_for_writing_messages()) {
+        return;
+    }
+
     switch(stage) {
     case Stage::FORMATS:
         // write log formats so the log is self-describing
         while (next_format_to_send < _logger_backend->num_types()) {
-            if (AP::scheduler().time_available_usec() == 0) { // write out the FMT messages as fast as we can
-                return;
-            }
             if (!_logger_backend->Write_Format(_logger_backend->structure(next_format_to_send))) {
                 return; // call me again!
             }
             next_format_to_send++;
         }
         _fmt_done = true;
+        stage = Stage::PARMS;
+        FALLTHROUGH;
+
+    case Stage::PARMS:
+        while (ap) {
+            if (!_logger_backend->Write_Parameter(ap, token, type)) {
+                return;
+            }
+            ap = AP_Param::next_scalar(&token, &type);
+        }
+
+        _params_done = true;
         stage = Stage::UNITS;
         FALLTHROUGH;
 
     case Stage::UNITS:
         while (_next_unit_to_send < _logger_backend->num_units()) {
-            if (AP::scheduler().time_available_usec() < MIN_LOOP_TIME_REMAINING_FOR_MESSAGE_WRITE_US) {
-                return;
-            }
             if (!_logger_backend->Write_Unit(_logger_backend->unit(_next_unit_to_send))) {
                 return; // call me again!
             }
@@ -72,9 +109,6 @@ void LoggerMessageWriter_DFLogStart::process()
 
     case Stage::MULTIPLIERS:
         while (_next_multiplier_to_send < _logger_backend->num_multipliers()) {
-            if (AP::scheduler().time_available_usec() < MIN_LOOP_TIME_REMAINING_FOR_MESSAGE_WRITE_US) {
-                return;
-            }
             if (!_logger_backend->Write_Multiplier(_logger_backend->multiplier(_next_multiplier_to_send))) {
                 return; // call me again!
             }
@@ -85,28 +119,11 @@ void LoggerMessageWriter_DFLogStart::process()
 
     case Stage::FORMAT_UNITS:
         while (_next_format_unit_to_send < _logger_backend->num_types()) {
-            if (AP::scheduler().time_available_usec() < MIN_LOOP_TIME_REMAINING_FOR_MESSAGE_WRITE_US) {
-                return;
-            }
             if (!_logger_backend->Write_Format_Units(_logger_backend->structure(_next_format_unit_to_send))) {
                 return; // call me again!
             }
             _next_format_unit_to_send++;
         }
-        stage = Stage::PARMS;
-        FALLTHROUGH;
-
-    case Stage::PARMS:
-        while (ap) {
-            if (AP::scheduler().time_available_usec() < MIN_LOOP_TIME_REMAINING_FOR_MESSAGE_WRITE_US) {
-                return;
-            }
-            if (!_logger_backend->Write_Parameter(ap, token, type)) {
-                return;
-            }
-            ap = AP_Param::next_scalar(&token, &type);
-        }
-
         stage = Stage::RUNNING_SUBWRITERS;
         FALLTHROUGH;
 
@@ -117,18 +134,22 @@ void LoggerMessageWriter_DFLogStart::process()
                 return;
             }
         }
+#if HAL_MISSION_ENABLED
         if (!_writeentiremission.finished()) {
             _writeentiremission.process();
             if (!_writeentiremission.finished()) {
                 return;
             }
         }
+#endif
+#if HAL_RALLY_ENABLED
         if (!_writeallrallypoints.finished()) {
             _writeallrallypoints.process();
             if (!_writeallrallypoints.finished()) {
                 return;
             }
         }
+#endif
         stage = Stage::VEHICLE_MESSAGES;
         FALLTHROUGH;
 
@@ -152,6 +173,7 @@ void LoggerMessageWriter_DFLogStart::process()
     _finished = true;
 }
 
+#if HAL_MISSION_ENABLED
 bool LoggerMessageWriter_DFLogStart::writeentiremission()
 {
     if (stage != Stage::DONE) {
@@ -162,7 +184,9 @@ bool LoggerMessageWriter_DFLogStart::writeentiremission()
     _writeentiremission.reset();
     return true;
 }
+#endif
 
+#if HAL_RALLY_ENABLED
 bool LoggerMessageWriter_DFLogStart::writeallrallypoints()
 {
     if (stage != Stage::DONE) {
@@ -173,6 +197,7 @@ bool LoggerMessageWriter_DFLogStart::writeallrallypoints()
     _writeallrallypoints.reset();
     return true;
 }
+#endif
 
 void LoggerMessageWriter_WriteSysInfo::reset()
 {
@@ -260,7 +285,7 @@ void LoggerMessageWriter_WriteAllRallyPoints::process()
 
     case Stage::WRITE_ALL_RALLY_POINTS:
         while (_rally_number_to_send < _rally->get_rally_total()) {
-            if (AP::scheduler().time_available_usec() < MIN_LOOP_TIME_REMAINING_FOR_MESSAGE_WRITE_US) {
+            if (out_of_time_for_writing_messages()) {
                 return;
             }
             RallyLocation rallypoint;
@@ -310,7 +335,7 @@ void LoggerMessageWriter_WriteEntireMission::process() {
     case Stage::WRITE_MISSION_ITEMS: {
         AP_Mission::Mission_Command cmd;
         while (_mission_number_to_send < _mission->num_commands()) {
-            if (AP::scheduler().time_available_usec() < MIN_LOOP_TIME_REMAINING_FOR_MESSAGE_WRITE_US) {
+            if (out_of_time_for_writing_messages()) {
                 return;
             }
             // upon failure to write the mission we will re-read from

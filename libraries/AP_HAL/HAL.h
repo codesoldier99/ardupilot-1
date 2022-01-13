@@ -9,6 +9,7 @@ class AP_Param;
 #include "RCInput.h"
 #include "RCOutput.h"
 #include "SPIDevice.h"
+#include "QSPIDevice.h"
 #include "Storage.h"
 #include "UARTDriver.h"
 #include "system.h"
@@ -27,8 +28,11 @@ public:
         AP_HAL::UARTDriver* _uartF, // extra1
         AP_HAL::UARTDriver* _uartG, // extra2
         AP_HAL::UARTDriver* _uartH, // extra3
+        AP_HAL::UARTDriver* _uartI, // extra4
+        AP_HAL::UARTDriver* _uartJ, // extra5
         AP_HAL::I2CDeviceManager* _i2c_mgr,
         AP_HAL::SPIDeviceManager* _spi,
+        AP_HAL::QSPIDeviceManager* _qspi,
         AP_HAL::AnalogIn*   _analogin,
         AP_HAL::Storage*    _storage,
         AP_HAL::UARTDriver* _console,
@@ -54,8 +58,11 @@ public:
         uartF(_uartF),
         uartG(_uartG),
         uartH(_uartH),
+        uartI(_uartI),
+        uartJ(_uartJ),
         i2c_mgr(_i2c_mgr),
         spi(_spi),
+        qspi(_qspi),
         analogin(_analogin),
         storage(_storage),
         console(_console),
@@ -99,6 +106,8 @@ public:
 
     virtual void run(int argc, char * const argv[], Callbacks* callbacks) const = 0;
 
+private:
+    // the uartX ports must be contiguous in ram for the serial() method to work
     AP_HAL::UARTDriver* uartA;
     AP_HAL::UARTDriver* uartB;
     AP_HAL::UARTDriver* uartC;
@@ -107,8 +116,13 @@ public:
     AP_HAL::UARTDriver* uartF;
     AP_HAL::UARTDriver* uartG;
     AP_HAL::UARTDriver* uartH;
+    AP_HAL::UARTDriver* uartI;
+    AP_HAL::UARTDriver* uartJ;
+
+public:
     AP_HAL::I2CDeviceManager* i2c_mgr;
     AP_HAL::SPIDeviceManager* spi;
+    AP_HAL::QSPIDeviceManager* qspi;
     AP_HAL::AnalogIn*   analogin;
     AP_HAL::Storage*    storage;
     AP_HAL::UARTDriver* console;
@@ -125,4 +139,9 @@ public:
 #else
     AP_HAL::CANIface** can;
 #endif
+
+    // access to serial ports using SERIALn_ numbering
+    UARTDriver* serial(uint8_t sernum) const;
+
+    static constexpr uint8_t num_serial = 10;
 };

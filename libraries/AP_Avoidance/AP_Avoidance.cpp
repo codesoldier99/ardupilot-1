@@ -1,5 +1,7 @@
 #include "AP_Avoidance.h"
 
+#if HAL_ADSB_ENABLED
+
 extern const AP_HAL::HAL& hal;
 
 #include <limits>
@@ -17,7 +19,7 @@ extern const AP_HAL::HAL& hal;
     #define AP_AVOIDANCE_FAIL_DISTANCE_Z_DEFAULT        100
     #define AP_AVOIDANCE_RECOVERY_DEFAULT               RecoveryAction::RESUME_IF_AUTO_ELSE_LOITER
     #define AP_AVOIDANCE_FAIL_ACTION_DEFAULT            MAV_COLLISION_ACTION_REPORT
-#else // APM_BUILD_TYPE(APM_BUILD_ArduCopter), Rover, Boat
+#else // APM_BUILD_TYPE(APM_BUILD_ArduCopter),Heli, Rover, Boat
     #define AP_AVOIDANCE_WARN_TIME_DEFAULT              30
     #define AP_AVOIDANCE_FAIL_TIME_DEFAULT              30
     #define AP_AVOIDANCE_WARN_DISTANCE_XY_DEFAULT       300
@@ -116,7 +118,7 @@ const AP_Param::GroupInfo AP_Avoidance::var_info[] = {
     
     // @Param: F_ALT_MIN
     // @DisplayName: ADS-B avoidance minimum altitude
-    // @Description: Minimum altitude for ADS-B avoidance. If the vehicle is below this altitude, no avoidance action will take place. Useful to prevent ADS-B avoidance from activating while below the tree line or around structures. Default of 0 is no minimum.
+    // @Description: Minimum AMSL (above mean sea level) altitude for ADS-B avoidance. If the vehicle is below this altitude, no avoidance action will take place. Useful to prevent ADS-B avoidance from activating while below the tree line or around structures. Default of 0 is no minimum.
     // @Units: m
     // @User: Advanced
     AP_GROUPINFO("F_ALT_MIN",    12, AP_Avoidance, _fail_altitude_minimum, 0),
@@ -270,9 +272,9 @@ void AP_Avoidance::get_adsb_samples()
                    MAV_COLLISION_SRC_ADSB,
                    src_id,
                    loc,
-                   vehicle.info.heading/100.0f,
-                   vehicle.info.hor_velocity/100.0f,
-                   -vehicle.info.ver_velocity/1000.0f); // convert mm-up to m-down
+                   vehicle.info.heading * 0.01,
+                   vehicle.info.hor_velocity * 0.01,
+                   -vehicle.info.ver_velocity * 0.01); // convert cm-up to m-down
     }
 }
 
@@ -607,7 +609,7 @@ void AP_Avoidance::handle_msg(const mavlink_message_t &msg)
 }
 
 // get unit vector away from the nearest obstacle
-bool AP_Avoidance::get_vector_perpendicular(const AP_Avoidance::Obstacle *obstacle, Vector3f &vec_neu)
+bool AP_Avoidance::get_vector_perpendicular(const AP_Avoidance::Obstacle *obstacle, Vector3f &vec_neu) const
 {
     if (obstacle == nullptr) {
         // why where we called?!
@@ -680,3 +682,5 @@ AP_Avoidance *ap_avoidance()
 }
 
 }
+
+#endif // HAL_ADSB_ENABLED

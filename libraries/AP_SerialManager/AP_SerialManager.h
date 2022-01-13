@@ -1,5 +1,5 @@
 /*
-   Please contribute your ideas! See https://dev.ardupilot.org for details
+   Please contribute your ideas! See https://ardupilot.org/dev for details
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -125,7 +125,7 @@ public:
         SerialProtocol_Rangefinder = 9,
         SerialProtocol_FrSky_SPort_Passthrough = 10, // FrSky SPort Passthrough (OpenTX) protocol (X-receivers)
         SerialProtocol_Lidar360 = 11,                // Lightware SF40C, TeraRanger Tower or RPLidarA2
-        SerialProtocol_Aerotenna_uLanding      = 12, // Ulanding support - deprecated, users should use Rangefinder
+        SerialProtocol_Aerotenna_USD1      = 12, // USD1 support - deprecated, users should use Rangefinder
         SerialProtocol_Beacon = 13,
         SerialProtocol_Volz = 14,                    // Volz servo protocol
         SerialProtocol_Sbus1 = 15,
@@ -147,6 +147,15 @@ public:
         SerialProtocol_Winch = 31,
         SerialProtocol_MSP = 32,
         SerialProtocol_DJI_FPV = 33,
+        SerialProtocol_AirSpeed = 34,
+        SerialProtocol_ADSB = 35,
+        SerialProtocol_AHRS = 36,
+        SerialProtocol_SmartAudio = 37,
+        SerialProtocol_FETtecOneWire = 38,
+        SerialProtocol_Torqeedo = 39,
+        SerialProtocol_AIS = 40,
+        SerialProtocol_CoDevESC = 41,
+        SerialProtocol_MSP_DisplayPort = 42,
         SerialProtocol_NumProtocols                    // must be the last value
     };
 
@@ -154,7 +163,7 @@ public:
     static AP_SerialManager *get_singleton(void) {
         return _singleton;
     }
-    
+
     // init_console - initialise console at default baud rate
     void init_console();
 
@@ -164,12 +173,19 @@ public:
     // find_serial - searches available serial ports that allows the given protocol
     //  instance should be zero if searching for the first instance, 1 for the second, etc
     //  returns uart on success, nullptr if a serial port cannot be found
+    // note that the SERIALn_OPTIONS are applied if the port is found
     AP_HAL::UARTDriver *find_serial(enum SerialProtocol protocol, uint8_t instance) const;
 
+    // have_serial - return true if we have the corresponding serial protocol configured
+    bool have_serial(enum SerialProtocol protocol, uint8_t instance) const;
+    
     // find_baudrate - searches available serial ports for the first instance that allows the given protocol
     //  instance should be zero if searching for the first instance, 1 for the second, etc
     //  returns the baudrate of that protocol on success, 0 if a serial port cannot be found
     uint32_t find_baudrate(enum SerialProtocol protocol, uint8_t instance) const;
+
+    // find_portnum - find port number (SERIALn index) for a protocol and instance, -1 for not found
+    int8_t find_portnum(enum SerialProtocol protocol, uint8_t instance) const;
 
     // get_mavlink_channel - provides the mavlink channel associated with a given protocol (and instance)
     //  instance should be zero if searching for the first instance, 1 for the second, etc
@@ -182,12 +198,13 @@ public:
     // get_mavlink_protocol - provides the specific MAVLink protocol for a
     // given channel, or SerialProtocol_None if not found
     SerialProtocol get_mavlink_protocol(mavlink_channel_t mav_chan) const;
-    
+
     // set_blocking_writes_all - sets block_writes on or off for all serial channels
     void set_blocking_writes_all(bool blocking);
 
     // get the passthru ports if enabled
-    bool get_passthru(AP_HAL::UARTDriver *&port1, AP_HAL::UARTDriver *&port2, uint8_t &timeout_s) const;
+    bool get_passthru(AP_HAL::UARTDriver *&port1, AP_HAL::UARTDriver *&port2, uint8_t &timeout_s,
+                      uint32_t &baud1, uint32_t &baud2) const;
 
     // disable passthru by settings SERIAL_PASS2 to -1
     void disable_passthru(void);
@@ -205,12 +222,11 @@ public:
 
 private:
     static AP_SerialManager *_singleton;
-    
+
     // array of uart info
     struct UARTState {
         AP_Int8 protocol;
         AP_Int32 baud;
-        AP_HAL::UARTDriver* uart;
         AP_Int16 options;
     } state[SERIALMANAGER_NUM_PORTS];
 
@@ -229,6 +245,8 @@ private:
 
     // setup any special options
     void set_options(uint16_t i);
+
+    bool init_console_done;
 };
 
 namespace AP {

@@ -1,16 +1,6 @@
 #include "GCS_Mavlink.h"
 #include "Tracker.h"
 
-/*
- *  !!NOTE!!
- *
- *  the use of NOINLINE separate functions for each message type avoids
- *  a compiler bug in gcc that would cause it to use far more stack
- *  space than is needed. Without the NOINLINE we use the sum of the
- *  stack needed for each message type. Please be careful to follow the
- *  pattern below when adding any new messages
- */
-
 MAV_TYPE GCS_Tracker::frame_type() const
 {
     return MAV_TYPE_ANTENNA_TRACKER;
@@ -146,7 +136,9 @@ void GCS_MAVLINK_Tracker::send_pid_tuning()
                                     pid_info->FF,
                                     pid_info->P,
                                     pid_info->I,
-                                    pid_info->D);
+                                    pid_info->D,
+                                    pid_info->slew_rate,
+                                    pid_info->Dmod);
         if (!HAVE_PAYLOAD_SPACE(chan, PID_TUNING)) {
             return;
         }
@@ -162,7 +154,9 @@ void GCS_MAVLINK_Tracker::send_pid_tuning()
                                     pid_info->FF,
                                     pid_info->P,
                                     pid_info->I,
-                                    pid_info->D);
+                                    pid_info->D,
+                                    pid_info->slew_rate,
+                                    pid_info->Dmod);
         if (!HAVE_PAYLOAD_SPACE(chan, PID_TUNING)) {
             return;
         }
@@ -188,7 +182,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Raw sensor stream rate
     // @Description: Raw sensor stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("RAW_SENS", 0, GCS_MAVLINK_Parameters, streamRates[0],  1),
@@ -197,7 +191,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Extended status stream rate to ground station
     // @Description: Extended status stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("EXT_STAT", 1, GCS_MAVLINK_Parameters, streamRates[1],  1),
@@ -206,7 +200,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: RC Channel stream rate to ground station
     // @Description: RC Channel stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("RC_CHAN",  2, GCS_MAVLINK_Parameters, streamRates[2],  1),
@@ -215,7 +209,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Raw Control stream rate to ground station
     // @Description: Raw Control stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("RAW_CTRL", 3, GCS_MAVLINK_Parameters, streamRates[3],  1),
@@ -224,7 +218,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Position stream rate to ground station
     // @Description: Position stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("POSITION", 4, GCS_MAVLINK_Parameters, streamRates[4],  1),
@@ -233,7 +227,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Extra data type 1 stream rate to ground station
     // @Description: Extra data type 1 stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("EXTRA1",   5, GCS_MAVLINK_Parameters, streamRates[5],  1),
@@ -242,7 +236,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Extra data type 2 stream rate to ground station
     // @Description: Extra data type 2 stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("EXTRA2",   6, GCS_MAVLINK_Parameters, streamRates[6],  1),
@@ -251,7 +245,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Extra data type 3 stream rate to ground station
     // @Description: Extra data type 3 stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("EXTRA3",   7, GCS_MAVLINK_Parameters, streamRates[7],  1),
@@ -260,7 +254,7 @@ const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
     // @DisplayName: Parameter stream rate to ground station
     // @Description: Parameter stream rate to ground station
     // @Units: Hz
-    // @Range: 0 10
+    // @Range: 0 50
     // @Increment: 1
     // @User: Advanced
     AP_GROUPINFO("PARAMS",   8, GCS_MAVLINK_Parameters, streamRates[8],  10),
@@ -274,11 +268,11 @@ static const ap_message STREAM_RAW_SENSORS_msgs[] = {
     MSG_SCALED_PRESSURE,
     MSG_SCALED_PRESSURE2,
     MSG_SCALED_PRESSURE3,
-    MSG_SENSOR_OFFSETS
 };
 static const ap_message STREAM_EXTENDED_STATUS_msgs[] = {
     MSG_SYS_STATUS,
     MSG_POWER_STATUS,
+    MSG_MCU_STATUS,
     MSG_MEMINFO,
     MSG_NAV_CONTROLLER_OUTPUT,
     MSG_GPS_RAW,
@@ -417,23 +411,25 @@ MAV_RESULT GCS_MAVLINK_Tracker::_handle_command_preflight_calibration_baro()
     return ret;
 }
 
+MAV_RESULT GCS_MAVLINK_Tracker::handle_command_component_arm_disarm(const mavlink_command_long_t &packet)
+{
+    if (is_equal(packet.param1,1.0f)) {
+        tracker.arm_servos();
+        return MAV_RESULT_ACCEPTED;
+    }
+    if (is_zero(packet.param1))  {
+        tracker.disarm_servos();
+        return MAV_RESULT_ACCEPTED;
+    }
+    return MAV_RESULT_UNSUPPORTED;
+}
+
 MAV_RESULT GCS_MAVLINK_Tracker::handle_command_long_packet(const mavlink_command_long_t &packet)
 {
     // do command
     send_text(MAV_SEVERITY_INFO,"Command received: ");
 
     switch(packet.command) {
-
-    case MAV_CMD_COMPONENT_ARM_DISARM:
-        if (is_equal(packet.param1,1.0f)) {
-            tracker.arm_servos();
-            return MAV_RESULT_ACCEPTED;
-        }
-        if (is_zero(packet.param1))  {
-            tracker.disarm_servos();
-            return MAV_RESULT_ACCEPTED;
-        }
-        return MAV_RESULT_UNSUPPORTED;
 
     case MAV_CMD_DO_SET_SERVO:
         // ensure we are in servo test mode

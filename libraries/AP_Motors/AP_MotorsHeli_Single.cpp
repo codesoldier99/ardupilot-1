@@ -125,7 +125,7 @@ const AP_Param::GroupInfo AP_MotorsHeli_Single::var_info[] = {
     // @Range: -180 180
     // @Units: deg
     // @User: Advanced
-    
+
     // @Param: SW_H3_PHANG
     // @DisplayName: H3 Generic Phase Angle Comp
     // @Description: Only for H3 swashplate.  If pitching the swash forward induces a roll, this can be correct the problem
@@ -161,7 +161,7 @@ void AP_MotorsHeli_Single::set_update_rate( uint16_t speed_hz )
 // init_outputs - initialise Servo/PWM ranges and endpoints
 bool AP_MotorsHeli_Single::init_outputs()
 {
-    if (!_flags.initialised_ok) {
+    if (!initialised_ok()) {
         // map primary swash servos
         for (uint8_t i=0; i<AP_MOTORS_HELI_SINGLE_NUM_SWASHPLATE_SERVOS; i++) {
             add_motor_num(CH_1+i);
@@ -185,7 +185,7 @@ bool AP_MotorsHeli_Single::init_outputs()
     }
 
     // set signal value for main rotor external governor to know when to use autorotation bailout ramp up
-    if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_SETPOINT  ||  _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_PASSTHROUGH) {
+    if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SETPOINT  ||  _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_PASSTHROUGH) {
         _main_rotor.set_ext_gov_arot_bail(_main_rotor._ext_gov_arot_pct.get());
     } else {
         _main_rotor.set_ext_gov_arot_bail(0);
@@ -215,7 +215,7 @@ bool AP_MotorsHeli_Single::init_outputs()
     // yaw servo is an angle from -4500 to 4500
     SRV_Channels::set_angle(SRV_Channel::k_motor4, YAW_SERVO_MAX_ANGLE);
 
-    _flags.initialised_ok = true;
+    set_initialised_ok(true);
 
     return true;
 }
@@ -274,17 +274,11 @@ void AP_MotorsHeli_Single::set_desired_rotor_speed(float desired_speed)
     _tail_rotor.set_desired_speed(_direct_drive_tailspeed*0.01f);
 }
 
-// set_rotor_rpm - used for governor with speed sensor
-void AP_MotorsHeli_Single::set_rpm(float rotor_rpm)
-{
-    _main_rotor.set_rotor_rpm(rotor_rpm);
-}
-
 // calculate_scalars - recalculates various scalers used.
 void AP_MotorsHeli_Single::calculate_armed_scalars()
 {
     // Set rsc mode specific parameters
-    if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_OPEN_LOOP_POWER_OUTPUT || _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_CLOSED_LOOP_POWER_OUTPUT) {
+    if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_THROTTLECURVE || _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_AUTOTHROTTLE) {
         _main_rotor.set_throttle_curve();
     }
     // keeps user from changing RSC mode while armed
@@ -294,7 +288,7 @@ void AP_MotorsHeli_Single::calculate_armed_scalars()
         _heliflags.save_rsc_mode = true;
     }
     // saves rsc mode parameter when disarmed if it had been reset while armed
-    if (_heliflags.save_rsc_mode && !_flags.armed) {
+    if (_heliflags.save_rsc_mode && !armed()) {
         _main_rotor._rsc_mode.save();
         _heliflags.save_rsc_mode = false;
     }
@@ -306,11 +300,11 @@ void AP_MotorsHeli_Single::calculate_armed_scalars()
     // allow use of external governor autorotation bailout
     if (_main_rotor._ext_gov_arot_pct.get() > 0) {
         // RSC only needs to know that the vehicle is in an autorotation if using the bailout window on an external governor
-        if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_SETPOINT  ||  _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_PASSTHROUGH) {
-            _main_rotor.set_autorotaion_flag(_heliflags.in_autorotation);
+        if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SETPOINT  ||  _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_PASSTHROUGH) {
+            _main_rotor.set_autorotation_flag(_heliflags.in_autorotation);
         }
         if (_tail_type == AP_MOTORS_HELI_SINGLE_TAILTYPE_DIRECTDRIVE_VARPIT_EXT_GOV) {
-            _tail_rotor.set_autorotaion_flag(_heliflags.in_autorotation);
+            _tail_rotor.set_autorotation_flag(_heliflags.in_autorotation);
         }
     }
 
@@ -319,15 +313,26 @@ void AP_MotorsHeli_Single::calculate_armed_scalars()
 // calculate_scalars - recalculates various scalers used.
 void AP_MotorsHeli_Single::calculate_scalars()
 {
-    // range check collective min, max and mid
+    // range check collective min, max and zero
     if( _collective_min >= _collective_max ) {
         _collective_min = AP_MOTORS_HELI_COLLECTIVE_MIN;
         _collective_max = AP_MOTORS_HELI_COLLECTIVE_MAX;
     }
-    _collective_mid = constrain_int16(_collective_mid, _collective_min, _collective_max);
 
-    // calculate collective mid point as a number from 0 to 1
-    _collective_mid_pct = ((float)(_collective_mid-_collective_min))/((float)(_collective_max-_collective_min));
+    _collective_zero_thrust_deg = constrain_float(_collective_zero_thrust_deg, _collective_min_deg, _collective_max_deg);
+
+    _collective_land_min_deg = constrain_float(_collective_land_min_deg, _collective_min_deg, _collective_max_deg);
+
+    if (!is_equal((float)_collective_max_deg, (float)_collective_min_deg)) {
+        // calculate collective zero thrust point as a number from 0 to 1
+        _collective_zero_thrust_pct = (_collective_zero_thrust_deg-_collective_min_deg)/(_collective_max_deg-_collective_min_deg);
+
+        // calculate collective land min point as a number from 0 to 1
+        _collective_land_min_pct = (_collective_land_min_deg-_collective_min_deg)/(_collective_max_deg-_collective_min_deg);
+    } else {
+        _collective_zero_thrust_pct = 0.0f;
+        _collective_land_min_pct = 0.0f;
+    }
 
     // configure swashplate and update scalars
     _swashplate.configure();
@@ -339,7 +344,7 @@ void AP_MotorsHeli_Single::calculate_scalars()
 
     // send setpoints to DDVP rotor controller and trigger recalculation of scalars
     if (_tail_type == AP_MOTORS_HELI_SINGLE_TAILTYPE_DIRECTDRIVE_VARPITCH || _tail_type == AP_MOTORS_HELI_SINGLE_TAILTYPE_DIRECTDRIVE_VARPIT_EXT_GOV) {
-        _tail_rotor.set_control_mode(ROTOR_CONTROL_MODE_SPEED_SETPOINT);
+        _tail_rotor.set_control_mode(ROTOR_CONTROL_MODE_SETPOINT);
         _tail_rotor.set_ramp_time(_main_rotor._ramp_time.get());
         _tail_rotor.set_runup_time(_main_rotor._runup_time.get());
         _tail_rotor.set_critical_speed(_main_rotor._critical_speed.get());
@@ -373,7 +378,7 @@ uint16_t AP_MotorsHeli_Single::get_motor_mask()
         mask |= 1U << AP_MOTORS_HELI_SINGLE_TAILRSC;
     }
 
-    return rc_map_mask(mask);
+    return motor_mask_to_srv_channel_mask(mask);
 }
 
 // update_motor_controls - sends commands to motor controllers
@@ -393,6 +398,9 @@ void AP_MotorsHeli_Single::update_motor_control(RotorControlState state)
 
     // Check if both rotors are run-up, tail rotor controller always returns true if not enabled
     _heliflags.rotor_runup_complete = ( _main_rotor.is_runup_complete() && _tail_rotor.is_runup_complete() );
+
+    // Check if both rotors are spooled down, tail rotor controller always returns true if not enabled
+    _heliflags.rotor_spooldown_complete = ( _main_rotor.is_spooldown_complete() );
 }
 
 //
@@ -408,16 +416,13 @@ void AP_MotorsHeli_Single::move_actuators(float roll_out, float pitch_out, float
     float yaw_offset = 0.0f;
 
     // initialize limits flag
-    limit.roll = false;
-    limit.pitch = false;
-    limit.yaw = false;
     limit.throttle_lower = false;
     limit.throttle_upper = false;
 
     if (_heliflags.inverted_flight) {
         coll_in = 1 - coll_in;
     }
- 
+
     // rescale roll_out and pitch_out into the min and max ranges to provide linear motion
     // across the input range instead of stopping when the input hits the constrain value
     // these calculations are based on an assumption of the user specified cyclic_max
@@ -444,10 +449,21 @@ void AP_MotorsHeli_Single::move_actuators(float roll_out, float pitch_out, float
     }
 
     // ensure not below landed/landing collective
-    if (_heliflags.landing_collective && collective_out < _collective_mid_pct && !_heliflags.in_autorotation) {
-        collective_out = _collective_mid_pct;
+    if (_heliflags.landing_collective && collective_out < _collective_land_min_pct && !_heliflags.in_autorotation) {
+        collective_out = _collective_land_min_pct;
         limit.throttle_lower = true;
+
     }
+
+    // updates below land min collective flag
+    if (collective_out <= _collective_land_min_pct) {
+        _heliflags.below_land_min_coll = true;
+    } else {
+        _heliflags.below_land_min_coll = false;
+    }
+
+    // updates takeoff collective flag based on 50% hover collective
+    update_takeoff_collective_flag(collective_out);
 
     // if servo output not in manual mode and heli is not in autorotation, process pre-compensation factors
     if (_servo_mode == SERVO_CONTROL_MODE_AUTOMATED && !_heliflags.in_autorotation) {
@@ -458,7 +474,7 @@ void AP_MotorsHeli_Single::move_actuators(float roll_out, float pitch_out, float
             // sanity check collective_yaw_effect
             _collective_yaw_effect = constrain_float(_collective_yaw_effect, -AP_MOTORS_HELI_SINGLE_COLYAW_RANGE, AP_MOTORS_HELI_SINGLE_COLYAW_RANGE);
             // the 4.5 scaling factor is to bring the values in line with previous releases
-            yaw_offset = _collective_yaw_effect * fabsf(collective_out - _collective_mid_pct) / 4.5f;
+            yaw_offset = _collective_yaw_effect * fabsf(collective_out - _collective_zero_thrust_pct) / 4.5f;
         }
     } else {
         yaw_offset = 0.0f;
@@ -503,7 +519,7 @@ void AP_MotorsHeli_Single::move_yaw(float yaw_out)
 
 void AP_MotorsHeli_Single::output_to_motors()
 {
-    if (!_flags.initialised_ok) {
+    if (!initialised_ok()) {
         return;
     }
 

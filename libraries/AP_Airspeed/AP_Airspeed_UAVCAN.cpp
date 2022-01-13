@@ -63,6 +63,9 @@ AP_Airspeed_Backend* AP_Airspeed_UAVCAN::probe(AP_Airspeed &_frontend, uint8_t _
                                       "Registered UAVCAN Airspeed Node %d on Bus %d\n",
                                       _detected_modules[i].node_id,
                                       _detected_modules[i].ap_uavcan->get_driver_index());
+                backend->set_bus_id(AP_HAL::Device::make_bus_id(AP_HAL::Device::BUS_TYPE_UAVCAN,
+                                                                _detected_modules[i].ap_uavcan->get_driver_index(),
+                                                                _detected_modules[i].node_id, 0));
             }
             break;
         }
@@ -116,8 +119,9 @@ void AP_Airspeed_UAVCAN::handle_airspeed(AP_UAVCAN* ap_uavcan, uint8_t node_id, 
     if (driver != nullptr) {
         WITH_SEMAPHORE(driver->_sem_airspeed);
         driver->_pressure = cb.msg->differential_pressure;
-        if (!isnan(cb.msg->static_air_temperature)) {
-            driver->_temperature = cb.msg->static_air_temperature - C_TO_KELVIN;
+        if (!isnan(cb.msg->static_air_temperature) &&
+            cb.msg->static_air_temperature > 0) {
+            driver->_temperature = KELVIN_TO_C(cb.msg->static_air_temperature);
             driver->_have_temperature = true;
         }
         driver->_last_sample_time_ms = AP_HAL::millis();
