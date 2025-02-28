@@ -13,18 +13,19 @@
  *  - Ability to use loiter radius smaller than L1 length
  */
 
+
 #include <AP_Math/AP_Math.h>
 #include <AP_AHRS/AP_AHRS.h>
 #include <AP_Param/AP_Param.h>
 #include <AP_Navigation/AP_Navigation.h>
-#include <AP_TECS/AP_TECS.h>
+#include <AP_SpdHgtControl/AP_SpdHgtControl.h>
 #include <AP_Common/Location.h>
 
 class AP_L1_Control : public AP_Navigation {
 public:
-    AP_L1_Control(AP_AHRS &ahrs, const AP_TECS *tecs)
+    AP_L1_Control(AP_AHRS &ahrs, const AP_SpdHgtControl *spdHgtControl)
         : _ahrs(ahrs)
-        , _tecs(tecs)
+        , _spdHgtControl(spdHgtControl)
     {
         AP_Param::setup_object_defaults(this, var_info);
     }
@@ -51,7 +52,12 @@ public:
     float turn_distance(float wp_radius) const override;
     float turn_distance(float wp_radius, float turn_angle) const override;
     float loiter_radius (const float loiter_radius) const override;
-    void update_waypoint(const struct Location &prev_WP, const struct Location &next_WP, float dist_min = 0.0f) override;
+	//修改代码
+	void update_loiter_ellipse(const struct Location &center, const int32_t maxradius_cm, const float minmaxratio, const float psi, const int8_t orientation, struct Location &aircraft_loc, Vector3f &aircraft_vel, struct Location &desired_loc);
+    void update_loiter_3d(const struct Location &S2center, const Vector3f &ercv, int32_t S2radius, const float & theta_r, int8_t orientation, struct Location &aircraft_loc, Vector3f &aircraft_vel, struct Location &desired_loc);
+	void update_loiter_3d(const struct Location &anchor, const struct Location &center_WP, float radius, float psi, float theta, float w, float sigma, int32_t dist, int8_t loiter_direction, Matrix3f M_pe, int32_t segment, struct Location &desired_loc);
+		
+	void update_waypoint(const struct Location &prev_WP, const struct Location &next_WP, float dist_min = 0.0f) override;
     void update_loiter(const struct Location &center_WP, float radius, int8_t loiter_direction) override;
     void update_heading_hold(int32_t navigation_heading_cd) override;
     void update_level_flight(void) override;
@@ -76,12 +82,17 @@ public:
         _reverse = reverse;
     }
 
+	float v1;
+	float v2;
+	float v3;
+	float v4;
+
 private:
     // reference to the AHRS object
     AP_AHRS &_ahrs;
 
     // pointer to the SpdHgtControl object
-    const AP_TECS *_tecs;
+    const AP_SpdHgtControl *_spdHgtControl;
 
     // lateral acceration in m/s required to fly to the
     // L1 reference point (+ve to right)
@@ -127,6 +138,6 @@ private:
     AP_Float _loiter_bank_limit;
 
     bool _reverse = false;
-    float get_yaw() const;
-    int32_t get_yaw_sensor() const;
+    float get_yaw();
+    float get_yaw_sensor();
 };
